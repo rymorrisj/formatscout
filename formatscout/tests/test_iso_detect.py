@@ -10,7 +10,7 @@ from backend.service.utils.smart_media_detector.tests import smart_media_fixture
 
 
 # ---------------------------------------------------------------------------
-# _cue_bin_path — multi-FILE fallthrough
+# _cue_bin_path, multi-FILE fallthrough
 # ---------------------------------------------------------------------------
 
 class TestCueBinPath:
@@ -74,7 +74,7 @@ class TestCueBinPath:
 
 
 # ---------------------------------------------------------------------------
-# _root_dir_entry_names — raw ISO 9660 directory record parsing
+# _root_dir_entry_names, raw ISO 9660 directory record parsing
 # ---------------------------------------------------------------------------
 
 class TestRootDirEntryNames:
@@ -95,7 +95,7 @@ class TestRootDirEntryNames:
 
     def test_skips_zero_padding_to_next_sector_boundary(self):
         """rec_len == 0 mid-buffer means padding to the next 2048-byte sector,
-        not end of data — the record right after the boundary must still be
+        not end of data, the record right after the boundary must still be
         parsed, matching how a real multi-sector root directory read behaves.
         """
         first = fx._dir_record(b"FIRST.DAT", 0, 0)
@@ -112,7 +112,7 @@ class TestRootDirEntryNames:
 
 
 # ---------------------------------------------------------------------------
-# _detect_from_xbe_scan — takes pre-read dir_data, no file access
+# _detect_from_xbe_scan, takes pre-read dir_data, no file access
 # ---------------------------------------------------------------------------
 
 class TestDetectFromXbeScan:
@@ -139,7 +139,7 @@ class TestDetectFromXbeScan:
 # ---------------------------------------------------------------------------
 # Regression: iso_detect reopen dedupe (perf pass, commit 98ce932).
 # _root_dir_entry_names()/_detect_from_xbe_scan() take pre-read dir_data
-# bytes, not a Path — they must never touch the filesystem themselves, and
+# bytes, not a Path, they must never touch the filesystem themselves, and
 # detect_from_pvd() must read the root directory exactly once and reuse it
 # for both the PS3_DISC.SFB check and the .xbe scan.
 # ---------------------------------------------------------------------------
@@ -154,7 +154,7 @@ class TestIsoDetectReopenAvoidance:
         def _boom(self, *a, **kw):
             raise AssertionError(
                 "_root_dir_entry_names()/_detect_from_xbe_scan() must not open any file "
-                "themselves — they must operate purely on pre-read dir_data bytes"
+                "themselves, they must operate purely on pre-read dir_data bytes"
             )
 
         monkeypatch.setattr(Path, "open", _boom)
@@ -165,7 +165,7 @@ class TestIsoDetectReopenAvoidance:
 
     def test_detect_from_pvd_opens_the_file_exactly_twice(self, tmp_path: Path, monkeypatch):
         """One open for the PVD sector read, one for the root directory read
-        inside _read_root_dir() — not one more per downstream helper that
+        inside _read_root_dir(), not one more per downstream helper that
         consumes the resulting dir_data.
         """
         from backend.service.utils.smart_media_detector.iso_detect import detect_from_pvd
@@ -187,12 +187,12 @@ class TestIsoDetectReopenAvoidance:
         assert result.era == "xbox"
         assert open_calls["n"] == 2, (
             f"expected exactly 2 opens of the ISO (PVD sector + root directory), "
-            f"got {open_calls['n']} — a helper may be reopening the file redundantly"
+            f"got {open_calls['n']}, a helper may be reopening the file redundantly"
         )
 
 
 # ---------------------------------------------------------------------------
-# detect_from_pvd — structural checks (PS3_DISC.SFB, .xbe scan), volume-label
+# detect_from_pvd, structural checks (PS3_DISC.SFB, .xbe scan), volume-label
 # keyword matching, publisher/preparer DOS matching, PS1/PS2 disambiguation
 # ---------------------------------------------------------------------------
 
@@ -216,7 +216,7 @@ class TestDetectFromPvd:
 
     def test_structural_check_wins_over_volume_label_keyword_match(self, tmp_path: Path):
         """PS3_DISC.SFB must win even when the volume label would otherwise
-        match a DOS keyword outright — pins the ordering the source comment
+        match a DOS keyword outright, pins the ordering the source comment
         calls out explicitly (structural checks run before the loose
         volume-label keyword loop).
         """
@@ -265,7 +265,7 @@ class TestDetectFromPvd:
     @pytest.mark.parametrize("publisher", fx.DOS_PUBLISHERS[:2])
     def test_dos_preparer_field_keywords(self, tmp_path: Path, publisher: str):
         """Same _DOS_PUBLISHERS set is checked against the preparer field too
-        (the second iteration of the (publisher, preparer) loop) — spot-check
+        (the second iteration of the (publisher, preparer) loop), spot-check
         two rather than all 11 since the loop body is identical either way.
         """
         iso_path = fx.write_pvd_iso(tmp_path / "game.iso", preparer=publisher)
@@ -281,7 +281,7 @@ class TestDetectFromPvd:
 
     def test_ps2_volume_prefix_dvd_size(self, tmp_path: Path):
         """Same SLES/SLUS/etc. prefix, but a file over 4.7 GB resolves to PS2
-        instead of PS1 — a sparse-truncated file is used so the test doesn't
+        instead of PS1, a sparse-truncated file is used so the test doesn't
         actually write gigabytes to disk.
         """
         iso_path = fx.write_pvd_iso(tmp_path / "game.iso", volume_id="SLES_123.45")
@@ -294,7 +294,7 @@ class TestDetectFromPvd:
     def test_sony_publisher_with_cdrom_system_id_is_ps1_regardless_of_size(self, tmp_path: Path):
         """sys_id == 'CD-ROM' + 'SONY' in publisher resolves to ps1 even
         without a recognised SLUS/SCES/etc. volume-label prefix, and even at
-        a large size — only a vol_starts_ps volume label triggers the PS2
+        a large size, only a vol_starts_ps volume label triggers the PS2
         DVD-size branch.
         """
         iso_path = fx.write_pvd_iso(
@@ -332,7 +332,7 @@ class TestDetectFromPvd:
 
 
 # ---------------------------------------------------------------------------
-# detect_iso — dispatch order: detect_from_magic -> detect_from_pvd ->
+# detect_iso, dispatch order: detect_from_magic -> detect_from_pvd ->
 # is_xiso -> size fallback.
 #
 # NOTE: magic_signatures.toml has zero signatures with "iso" in applies_to
@@ -517,7 +517,7 @@ class TestDetectCue:
 
 
 # ---------------------------------------------------------------------------
-# detect_chd — thin delegation to validators.chd_validator.detect(). Full
+# detect_chd, thin delegation to validators.chd_validator.detect(). Full
 # CHD parsing logic already covered by test_chd_validator.py; this only
 # confirms the wiring.
 # ---------------------------------------------------------------------------

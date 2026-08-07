@@ -1,6 +1,6 @@
 """
 Usage:
-    python -m backend.service.utils.smart_media_detector.hashing.build_index --dats <dir> [--output <path>] [--rebuild]
+    python -m formatscout.hashing.build_index --dats <dir> [--output <path>] [--rebuild]
 """
 
 import argparse
@@ -26,7 +26,7 @@ def _load_existing(output_path: Path) -> dict:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     parser = argparse.ArgumentParser(
-        description="Build or update the smart_media_detector hash index from DAT files."
+        description="Build or update the formatscout hash index from DAT files."
     )
     parser.add_argument(
         "--dats",

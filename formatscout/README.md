@@ -1,11 +1,12 @@
-# smart_media_detector
+# formatscout
 
 Identifies platform, era, and (when possible) title from a disk image file or a
 directory, using a five-tier detection pipeline that trades off confidence against
-how much it has to inspect. Built to eventually be vendored out into its own
-standalone package once Peach 1UP reaches Beta, so it is kept mostly free of
-project-specific imports (see "Standalone-package intent" below for the current
-state of that goal, including the places it still falls short).
+how much it has to inspect. Originally built as `smart_media_detector` inside the
+Peach 1UP monorepo, to eventually be vendored out into its own standalone package
+once Peach 1UP reaches Beta; that extraction has now happened, this package lives
+at the top level as `formatscout` (see "Standalone-package intent" below for the
+current state of that goal, including the places it still falls short).
 
 ## What it does
 
@@ -19,6 +20,59 @@ with `confidence=0.0` and an explanatory reason instead.
 
 Detection runs in tier order and stops at the first confident match. This matches
 `dev_docs/TECH.md`'s documented description with no drift in pipeline structure.
+
+The flowchart below is generated from the actual code path in `detector.py`,
+`iso_detect.py`, and `directory_detect.py` as of this README revision, not from
+the prose description above; if the two ever disagree, treat this diagram as
+current and the prose as needing an update.
+
+```mermaid
+flowchart TD
+    Start(["detect(path, dir_cache)"]) --> Exists{"path.exists()?"}
+    Exists -- "no" --> RNone["ScanResult(confidence=0.0,<br/>reason='path does not exist')"]
+
+    Exists -- "yes" --> Hash["Tier 1: hash_lookup.lookup()<br/>sha1 (or CHD embedded rawsha1) -&gt; md5 -&gt; crc32<br/>against hashing/hash_index.json"]
+    Hash -- "era resolved (confidence 1.0 / 0.85 / 0.75)" --> Stamp
+    Hash -- "no match / index missing" --> Kind{"file or directory?"}
+
+    Kind -- neither --> RBad["ScanResult(confidence=0.0,<br/>reason='not a file or directory')"]
+    Kind -- file --> FileDispatch["_detect_file(): dispatch on suffix"]
+    Kind -- directory --> DirDispatch["detect_directory()"]
+
+    FileDispatch --> ExtOnly[".nds / .xiso / .xex / .z64 family<br/>.sfc family / .nes / .pkg<br/>Tier 5: extension only, confidence 0.0-0.7"]
+    FileDispatch --> GdCdi[".gdi / .cdi<br/>Tier 2 magic bytes: match -&gt; 0.9<br/>no match -&gt; Tier 5 era=dreamcast, 0.5"]
+    FileDispatch --> IsoBranch[".iso -&gt; detect_iso()"]
+    FileDispatch --> BinBranch[".bin -&gt; Tier 2 magic (0.9) -&gt; Tier 3 PVD (0.7-0.9)<br/>-&gt; bin_validator.resolve_bin_cue() (0.2-0.85)"]
+    FileDispatch --> CueBranch[".cue -&gt; detect_cue(): find sibling .bin<br/>(none found -&gt; 0.0 + warning); found -&gt; same<br/>magic -&gt; PVD -&gt; resolve_bin_cue() chain as .bin"]
+    FileDispatch --> ChdBranch[".chd -&gt; chd_validator.detect(): CHD v5 metadata chain<br/>CHGD tag -&gt; dreamcast 0.85; CHTR/CHT2 -&gt; ps1/ps2 by<br/>logical size, 0.3 heuristic; no tag -&gt; 0.0"]
+    FileDispatch --> ImgBranch[".img -&gt; Tier 5 size fallback:<br/>era=dos 0.35 if &lt;800MB, else 0.0"]
+    FileDispatch --> ExeBranch[".exe -&gt; exe_detect.detect_exe(): Tier 3 PE header<br/>MajorOSVersion/Subsystem -&gt; dos 0.65 / win98 0.75 /<br/>winxp 0.75; else 0.0"]
+    FileDispatch --> NoSig["no suffix match -&gt; confidence=0.0"]
+
+    IsoBranch --> IsoMagic["Tier 2 magic (applies_to='iso';<br/>no signature targets .iso today -&gt; always falls through)"]
+    IsoMagic -- match --> IsoR1["confidence=0.9"]
+    IsoMagic -- "no match" --> IsoPvd["Tier 3: detect_from_pvd()<br/>ISO 9660 PVD @ sector 16"]
+    IsoPvd -- "PS3_DISC.SFB in root dir" --> IsoR2["era=ps3, 0.9"]
+    IsoPvd -- ".XBE in root dir" --> IsoR3["era=xbox, 0.8"]
+    IsoPvd -- "volume label / publisher keyword" --> IsoR4["era=winxp/win98/win95/dos/ps1/ps2, 0.7-0.75"]
+    IsoPvd -- "no PVD signal" --> XboxImg["xbox_image.detect_xbox_image_type()<br/>(internal module, byte-offset check only)"]
+    XboxImg -- "'xiso' (XDVDFS magic @ 0x10000)" --> IsoR5["era=xbox, 0.9"]
+    XboxImg -- "'dvd_rip' (ISO9660 magic, size &gt; 4GB)" --> IsoR6["era=xbox, 0.9<br/>requires_extraction=True"]
+    XboxImg -- "'iso9660' / 'unknown'" --> IsoFb["Tier 5: _iso_size_fallback()<br/>by size vs 4GB / 800MB -&gt; 0.0-0.2"]
+
+    DirDispatch --> Autorun["Tier 4a: _detect_from_autorun()<br/>AUTORUN.INF OPEN=/RUN= -&gt; pointed .exe's PE header"]
+    Autorun -- "era resolved" --> AutoR["era=dos/win98/winxp, 0.65-0.75"]
+    Autorun -- "no signal" --> DirHeur["Tier 4b: _detect_from_directory()"]
+    DirHeur -- "resolve_ps3_target() match" --> DirR1["era=ps3, 0.85-0.9"]
+    DirHeur -- "resolve_xex_target() match" --> DirR2["era=xbox360, 0.85"]
+    DirHeur -- "root marker files (XPSP/I386, WIN98/95,<br/>SYSTEM.CNF, INSTALL.*)" --> DirR3["era resolved by marker, 0.4-0.8<br/>(SYSTEM.CNF via magic_detect.resolve_ps_generation_from_file)"]
+    DirHeur -- "depth-2 scan (DOS tools, .WAD,<br/>split archives, .BAT, DOS-only exts)" --> DirR4["era=dos, 0.5-0.6"]
+    DirHeur -- "nothing matched" --> DirR5["confidence=0.0"]
+
+    ExtOnly & GdCdi & IsoR1 & IsoR2 & IsoR3 & IsoR4 & IsoR5 & IsoR6 & IsoFb & BinBranch & CueBranch & ChdBranch & ImgBranch & ExeBranch & NoSig & AutoR & DirR1 & DirR2 & DirR3 & DirR4 & DirR5 --> Stamp
+
+    Stamp["_compute_requires_install(path, result.era)<br/>sets ScanResult.requires_install"] --> Final(["ScanResult returned to caller<br/>(detect() wraps all of this in try/except,<br/>any unexpected error -&gt; confidence=0.0)"])
+```
 
 1. **Hash lookup** (`hashing/hash_lookup.py`), full-file SHA-1, with MD5 and
    CRC32 fallback, checked against the bundled `hashing/hash_index.json`. A SHA-1
@@ -69,11 +123,12 @@ the install/setup blocklist in `utils/blocklist.py`).
 
 ## How to use it
 
-The package's public surface, per `__init__.py`, is six names: `detect`,
-`ScanResult`, `verify`, `VerifyResult`, `classify`, and `ClassifyResult`.
+The package's public surface, per `__init__.py`, is nine names: `detect`,
+`ScanResult`, `verify`, `VerifyResult`, `classify`, `ClassifyResult`,
+`MediaTarget`, `resolve_ps3_target`, and `resolve_xex_target`.
 
 ```python
-from backend.service.utils.smart_media_detector import detect, ScanResult
+from formatscout import detect, ScanResult
 
 scan: ScanResult = detect(Path("/path/to/some.iso"))
 if scan.era is not None:
@@ -89,6 +144,72 @@ module-level import (`backend/service/games/items.py`,
 `None` to decide whether detection succeeded, and separately inspect
 `scan.warnings` for logging even on a successful low-confidence match.
 
+### Verified public API reference
+
+Signatures below are read directly from the current source, not from memory.
+Anything not listed here (or in the "documented but not `__init__`-exported"
+subsection further down) is internal, not meant to be imported by a consumer.
+
+**Entry points** (`__init__.py`):
+
+```python
+def detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> ScanResult
+    # detector.py
+
+def verify(path: Path, expected_sha1: str) -> VerifyResult
+    # verify.py
+
+def classify(
+    path: Path, title: str, era: str | None, *, threshold: float = 0.80,
+) -> ClassifyResult
+    # classify.py
+
+def resolve_ps3_target(folder: Path) -> MediaTarget | None
+    # directory_detect.py
+
+def resolve_xex_target(folder: Path) -> MediaTarget | None
+    # directory_detect.py
+```
+
+**Result dataclasses** (`result.py`), all `@dataclass(slots=True)`:
+
+```python
+@dataclass(slots=True, frozen=True)
+class MediaTarget:
+    kind: Literal["file", "disc_folder", "installed_dir", "xex_folder"]
+    detect_path: Path
+    launch_path: Path
+    era: str | None
+    requires_install: bool
+    license_files: tuple[Path, ...] = ()
+
+@dataclass(slots=True)
+class ScanResult:
+    title: str | None
+    platform: str | None
+    era: str | None
+    confidence: float
+    reason: str
+    requires_install: bool = False
+    requires_extraction: bool = False
+    warnings: list[str] = field(default_factory=list)
+
+@dataclass(slots=True)
+class VerifyResult:
+    status: Literal["matched", "mismatched", "not_in_index"]
+    computed_sha1: str
+    expected_sha1: str
+    reason: str
+
+@dataclass(slots=True)
+class ClassifyResult:
+    status: Literal["verified", "caution", "mismatch", "not_in_index", "unchecked"]
+    computed_sha1: str | None
+    matched_title: str | None
+    similarity: float | None
+    reason: str
+```
+
 ### verify(), hash-only re-check, separate from detect()
 
 `verify(path, expected_sha1) -> VerifyResult` (`verify.py`) is a second,
@@ -101,7 +222,7 @@ point, not to identify an unknown file for the first time, that is still
 `detect()`'s job.
 
 ```python
-from backend.service.utils.smart_media_detector import verify, VerifyResult
+from formatscout import verify, VerifyResult
 
 result: VerifyResult = verify(Path("/path/to/some.iso"), expected_sha1="…")
 result.status  # "matched" | "mismatched" | "not_in_index"
@@ -129,7 +250,7 @@ is used both at ingest (one call per disc, see `backend/service/games/items.py`)
 and for a from-scratch manual re-check.
 
 ```python
-from backend.service.utils.smart_media_detector import classify, ClassifyResult
+from formatscout import classify, ClassifyResult
 
 result: ClassifyResult = classify(Path("/path/to/some.iso"), title="Halo", era="xbox")
 result.status  # "verified" | "caution" | "mismatch" | "not_in_index" | "unchecked"
@@ -176,6 +297,37 @@ from `hashing/hash_lookup.py`, which returns `{"sha1": ..., "md5": ...,
 directly to verify a placed BIOS file's SHA-1 against a known-good hash.
 `verify()` and `classify()` above are both built on this same primitive.
 
+### Other functions documented as directly-imported, not `__init__`-exported
+
+A repo-wide audit (done alongside the `smart_media_detector` -> `formatscout`
+structural move) found three more functions in the same shape as `hash_file()`
+above: not in `__init__.py`, but named in this package's own docstrings as
+something a specific external caller imports directly rather than reaching
+through `detect()`/`ScanResult`. Listed here for visibility, not yet resolved
+one way or the other, each is a case-by-case call the maintainer still needs
+to make (export it formally, or make it explicitly private):
+
+- `find_default_xex(folder: Path) -> Path | None` (`directory_detect.py`).
+  Its own docstring calls it "Public (not module-private)... Kept importable
+  on its own too", a deliberate choice distinct from the exported
+  `resolve_xex_target()`, for a caller that wants the raw `.xex` path lookup
+  without `MediaTarget` wrapping. Unlike `hash_file()`, this one isn't named
+  as used by any specific caller today, it's speculative public-by-intent.
+- `is_disc_format_folder(folder: Path) -> bool` and
+  `find_eboot(folder: Path) -> Path | None` (`directory_detect.py`).
+  `resolve_ps3_target()`'s docstring says it exists "instead of each
+  independently reimplementing the `is_disc_format_folder`/`find_eboot`
+  check", and a comment above `is_disc_format_folder` says these were "moved
+  here from `backend.service.backends.rpcs3`... and `rpcs3.py` now imports it
+  from here instead". That reads as `rpcs3.py` importing the low-level
+  building blocks directly rather than going through the exported resolver,
+  the same shape as the pre-fix `xbox_image` case, just not yet folded in.
+- `extract_embedded_sha1(path: Path) -> str | None`
+  (`validators/chd_validator.py`). `ClassifyResult`'s own docstring in
+  `result.py` tells a caller needing the CHD embedded rawsha1 to "use
+  `validators.chd_validator.extract_embedded_sha1` directly", an explicit,
+  self-documented pointer at an unexported function.
+
 ## Where the hash source data comes from
 
 `hash_index.json` is generated offline from DAT files published by preservation
@@ -208,7 +360,7 @@ affect how a future DAT for these platforms would resolve once ingested.
 The process is entirely manual, there is no ingestion automation:
 
 ```bash
-python -m backend.service.utils.smart_media_detector.hashing.build_index \
+python -m formatscout.hashing.build_index \
     --dats <directory-of-dat-files> [--output <path>] [--rebuild]
 ```
 
@@ -246,7 +398,7 @@ interested in how we do that *or if you are passionate about perseving your medi
 It is idempotent (upsert by `sha1`, existing rows updated in place, nothing
 wiped) and standalone (not called from any startup/lifespan hook or from
 this package). This package has no knowledge of the script, the DB table, or
-SQLModel, and never will — it stays storage-agnostic per the
+SQLModel, and never will, it stays storage-agnostic per the
 "Standalone-package intent" section below. Nothing in this package's own
 code path (`detect()`, `hash_lookup.py`) reads from that table; both consume
 `hash_index.json` independently.
@@ -291,13 +443,17 @@ a hash match.
 
 ## Standalone-package intent
 
-The package is written to eventually be extracted into its own repository,
-`__init__.py` exposes `detect`, `ScanResult`, `verify`, `VerifyResult`,
-`classify`, `ClassifyResult`, `MediaTarget`, `resolve_ps3_target`, and
+The package was written to eventually be extracted into its own repository,
+and that extraction has now happened, this is that repository. `__init__.py`
+exposes `detect`, `ScanResult`, `verify`, `VerifyResult`, `classify`,
+`ClassifyResult`, `MediaTarget`, `resolve_ps3_target`, and
 `resolve_xex_target`, and the bulk of the code, `detector.py`'s dispatch
 logic, `magic/`, `validators/`, `iso_detect.py`, `exe_detect.py`,
 `directory_detect.py`, and the hashing pipeline, has no dependency on the
-rest of Peach 1UP.
+rest of Peach 1UP. The history below describes the import-hygiene work done
+while this package still lived inside the Peach 1UP monorepo, before the
+copy-out and the later `smart_media_detector` -> `formatscout` structural
+move; it is kept for context, not because any of it still needs doing.
 
 - `detector.py` and `directory_detect.py` previously both imported
   `backend.core.logger.get_logger` for their module loggers, the last
@@ -312,9 +468,10 @@ rest of Peach 1UP.
   MediaTarget refactor (Step 3). `is_disc_format_folder`/`find_eboot` now
   live in `directory_detect.py` itself, and `rpcs3.py` imports them from
   here instead.
-  Because `logging.getLogger(__name__)` still produces a logger named
-  `backend.service.utils.smart_media_detector.<module>`, it is still picked
-  up automatically by `setup_logging()` in `backend/core/logger.py`, which
+  Because `logging.getLogger(__name__)` still produced a logger named
+  `backend.service.utils.smart_media_detector.<module>` at the time (this was
+  still inside the Peach 1UP monorepo), it was still picked up automatically
+  by `setup_logging()` in `backend/core/logger.py`, which
   attaches its `RotatingFileHandler`s to every already-instantiated logger
   whose name starts with `"backend"` or `"peach"`. No wiring change was
   needed for file logging to keep working. One real behavior difference
@@ -354,9 +511,12 @@ rest of Peach 1UP.
   removed as dead code, they are noted here only so the history of this
   cleanup isn't lost.
 
-No packaging scaffolding (`pyproject.toml`, `setup.py`, version metadata, its
-own test runner config) exists yet inside this directory, extraction has not
-been started beyond the import-hygiene intent described above.
+Packaging scaffolding now exists at this repo's root: `pyproject.toml`
+declares the `formatscout` project and lists `formatscout`,
+`formatscout.hashing`, `formatscout.magic`, `formatscout.utils`, and
+`formatscout.validators` as packages, plus package-data entries for
+`hash_index.json` and `magic_signatures.toml`. No `setup.py` or version-bump
+tooling beyond the static `version = "0.1.0"` in `pyproject.toml` exists yet.
 
 ### Extraction readiness checklist
 
@@ -372,17 +532,18 @@ been started beyond the import-hygiene intent described above.
   this is a one-way fork, see above.
 - [x] Test suite fully colocated under the package's own `tests/` folder,
   nothing left in `backend/tests/` for this package.
-- [ ] No packaging scaffolding yet (`pyproject.toml`, `setup.py`, version
-  metadata, a standalone test-runner config independent of the monorepo's
-  root `pyproject.toml`). Not started.
+- [x] Basic packaging scaffolding in place: root `pyproject.toml` with a
+  `[project]`/`[tool.setuptools]`/`[tool.setuptools.package-data]` section
+  for the now-top-level `formatscout` package. No `setup.py`, no automated
+  version bumping, and (see "Running just this package's tests" above) no
+  `[tool.pytest.ini_options]`/`testpaths` section yet.
 - [ ] Storage model is local-`Path`-only (see Known limitations below), not
   yet storage-agnostic in the broader sense a standalone package's public
   API might want to promise.
 - [ ] `hash_index.json` is ~88MB and lives inside the package directory
-  today (`hashing/hash_index.json`); an extraction plan needs to decide
-  whether that ships inside the new package's own repo, as a release
-  asset, or as a separately-distributed data file, before this can be
-  called packaging-ready.
+  today (`hashing/hash_index.json`); a decision is still needed on whether
+  that ships inside this repo long-term, as a release asset, or as a
+  separately-distributed data file.
 
 ## Current test coverage
 
@@ -417,13 +578,19 @@ real, well-formed TOML.
 ### Running just this package's tests
 
 ```bash
-pytest backend/service/utils/smart_media_detector/tests/
+pytest formatscout/tests/
 ```
 
-Run from the repository root. `pyproject.toml`'s `[tool.pytest.ini_options]`
-already lists this folder in `testpaths` alongside `backend/tests`, so a
-bare `pytest` from the repo root also picks it up, this command is for
-running only this package's tests in isolation.
+Run from the repository root. This standalone repo's `pyproject.toml` has no
+`[tool.pytest.ini_options]`/`testpaths` section of its own yet, unlike the
+Peach 1UP monorepo's root `pyproject.toml`, which listed this folder
+alongside `backend/tests`, so a bare `pytest` from this repo's root currently
+relies on default discovery rather than an explicit `testpaths` entry. Also
+see the "cross-package test imports" note near the top of this repo's
+`pyproject.toml`: the tests under `formatscout/tests/` still import
+themselves via the old monorepo path and will not currently import
+successfully from this package's own root, a known, separately-tracked gap,
+not something this command fixes.
 
 ## Known limitations
 

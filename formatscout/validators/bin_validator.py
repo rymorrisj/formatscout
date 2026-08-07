@@ -34,13 +34,13 @@ def resolve_bin_cue(
             reason=f"{bin_path.name}: no sibling .cue sheet found",
             warnings=[
                 f"{bin_path.name}: .bin files cannot be reliably identified without their "
-                "cue sheet — add the matching .cue file for accurate detection"
+                "cue sheet, add the matching .cue file for accurate detection"
             ],
         )
 
     track_type = _parse_cue_track_type(cue_path)
 
-    # Magic byte check — reuses the existing signature table, no duplication.
+    # Magic byte check, reuses the existing signature table, no duplication.
     # Called here (not just in detector.py) because resolve_bin_cue is also
     # reachable from .cue entry paths where the .bin magic may not have run yet.
     era, reason = detect_from_magic(bin_path, "bin")
@@ -53,7 +53,7 @@ def resolve_bin_cue(
             reason=f"{reason} (confirmed by {cue_path.name})",
         )
 
-    # No magic match — use track type as secondary signal
+    # No magic match, use track type as secondary signal
     if track_type == "MODE2/2352":
         return ScanResult(
             title=None,
@@ -61,7 +61,7 @@ def resolve_bin_cue(
             era=None,
             confidence=0.4,
             reason=(
-                f"{cue_path.name} declares MODE2/2352 — raw CD-ROM image, "
+                f"{cue_path.name} declares MODE2/2352, raw CD-ROM image, "
                 "platform ambiguous (PS1 / PS2 / Dreamcast)"
             ),
             warnings=[
@@ -76,7 +76,7 @@ def resolve_bin_cue(
             platform=None,
             era=None,
             confidence=0.35,
-            reason=f"{cue_path.name} declares MODE1/2352 — generic CD-ROM data disc, era undetermined",
+            reason=f"{cue_path.name} declares MODE1/2352, generic CD-ROM data disc, era undetermined",
             warnings=["no platform-specific signals found in MODE1 sector"],
         )
 
@@ -86,7 +86,7 @@ def resolve_bin_cue(
             platform=None,
             era=None,
             confidence=0.2,
-            reason=f"{cue_path.name} first TRACK is AUDIO — no data track to inspect",
+            reason=f"{cue_path.name} first TRACK is AUDIO, no data track to inspect",
             warnings=["cue sheet describes an audio disc or multi-track image with audio first"],
         )
 

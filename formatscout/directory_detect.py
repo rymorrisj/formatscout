@@ -13,7 +13,7 @@ _DOS_TOOLS = frozenset({"DEICE.EXE", "PKUNZIP.EXE", "PKUNZIP.COM", "LZMA.EXE"})
 # PS3_DISC.SFB at a folder's root (alongside PS3_GAME/, optionally PS3_UPDATE/)
 # marks the folder as a disc-format dump. RPCS3's own "Boot Game" targets the
 # folder itself in this case and does its own internal walk, so the folder is
-# the launch unit, not a resolved EBOOT.BIN — a distinct shape from the
+# the launch unit, not a resolved EBOOT.BIN, a distinct shape from the
 # dev_hdd0/game/<TITLE_ID>/ and loose extracted folders find_eboot resolves.
 # Moved here from backend.service.backends.rpcs3 (was a backend-into-detector
 # import, backwards from this package's standalone-vendorable goal): this
@@ -49,7 +49,7 @@ def resolve_ps3_target(folder: Path) -> MediaTarget | None:
     check (the C4 inversion this package used to require a backend import
     for).
 
-    A real, bootable EBOOT.BIN must exist for either shape to resolve — a
+    A real, bootable EBOOT.BIN must exist for either shape to resolve, a
     folder with PS3_DISC.SFB but no findable EBOOT.BIN is not a valid target
     and returns None here, the same as a folder with neither signal. This is
     deliberate: the disc-format branch used to trust the SFB marker alone and
@@ -58,9 +58,9 @@ def resolve_ps3_target(folder: Path) -> MediaTarget | None:
 
     detect_path is always the resolved EBOOT.BIN (what classify()/hash_file()
     should hash); launch_path is always the folder itself (what RPCS3 is
-    handed — it does its own internal walk from the folder root for both
+    handed, it does its own internal walk from the folder root for both
     shapes). era is resolved structurally here, not by suffix-dispatching
-    the returned EBOOT.BIN through detect()'s generic .bin handling — calling
+    the returned EBOOT.BIN through detect()'s generic .bin handling, calling
     detect() on *folder* directly (which reaches this same structural check
     via detect_directory) is how a caller should get a ScanResult for a PS3
     folder, never detect() on the EBOOT.BIN file.
@@ -87,7 +87,7 @@ def resolve_xex_target(folder: Path) -> MediaTarget | None:
     ingest/detection layer (backend.service.games.items.best_detect_path) and
     the launch backend (backend.service.backends.xenia.launch) instead of
     each independently calling find_default_xex. Unlike PS3, detect_path and
-    launch_path are the same file here — Xenia is handed the resolved .xex
+    launch_path are the same file here, Xenia is handed the resolved .xex
     directly, not the containing folder.
 
     Returns:
@@ -207,7 +207,7 @@ def _detect_from_pe(exe_path: Path) -> ScanResult:
         if header[pe_offset: pe_offset + 4] != b"PE\x00\x00":
             return ScanResult(
                 title=None, platform=None, era="dos", confidence=0.65,
-                reason="AUTORUN.INF exe has MZ header but no PE signature — likely DOS",
+                reason="AUTORUN.INF exe has MZ header but no PE signature, likely DOS",
             )
 
         # Optional header offset 68 = Subsystem; offset 40 = MajorOperatingSystemVersion
@@ -342,7 +342,7 @@ def _detect_from_directory(root: Path) -> ScanResult:
     if root_exts_all.intersection({".1", ".2", ".3"}) and ".dat" in root_exts_all:
         return ScanResult(
             title=None, platform=None, era="dos", confidence=0.55,
-            reason="directory contains split archive files (.1/.2/.3) with .DAT — DOS installer",
+            reason="directory contains split archive files (.1/.2/.3) with .DAT, DOS installer",
         )
     if any(e.endswith(".BAT") for e in entries) and not entries.intersection(_WINDOWS_MARKERS):
         return ScanResult(

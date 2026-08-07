@@ -36,7 +36,7 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
     if not index:
         return None
 
-    # CHD containers never match on raw file bytes — chdman compresses and wraps
+    # CHD containers never match on raw file bytes, chdman compresses and wraps
     # the original track data, so hashing the .chd file itself cannot equal a
     # Redump hash of the original dump. Use the header's embedded rawsha1 field
     # (the hash of the raw, uncompressed data) instead.

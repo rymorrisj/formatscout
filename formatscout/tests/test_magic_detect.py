@@ -9,7 +9,7 @@ from backend.service.utils.smart_media_detector.tests import smart_media_fixture
 
 
 # ---------------------------------------------------------------------------
-# detect_from_magic() — continue-vs-return for cdrom_sync_ambiguous
+# detect_from_magic(), continue-vs-return for cdrom_sync_ambiguous
 # ---------------------------------------------------------------------------
 
 class TestDetectFromMagicContinueVsReturn:
@@ -43,7 +43,7 @@ class TestDetectFromMagicContinueVsReturn:
 
     def test_pure_ambiguous_sync_with_no_further_match_returns_none(self, tmp_path: Path):
         """Same short-file "unknown" resolution, but with no other signature
-        present afterward — confirms the fall-through correctly exhausts the
+        present afterward, confirms the fall-through correctly exhausts the
         list and returns (None, ""), not a false positive.
         """
         from backend.service.utils.smart_media_detector.magic.magic_detect import detect_from_magic
@@ -100,7 +100,7 @@ class TestDetectFromMagicPerSignature:
 
 
 # ---------------------------------------------------------------------------
-# resolve_ps_generation_from_file() — SYSTEM.CNF already extracted to disk
+# resolve_ps_generation_from_file(), SYSTEM.CNF already extracted to disk
 # ---------------------------------------------------------------------------
 
 class TestResolvePsGenerationFromFile:
@@ -124,7 +124,7 @@ class TestResolvePsGenerationFromFile:
 
 
 # ---------------------------------------------------------------------------
-# _resolve_ps_generation() — raw CD sector read (Part 1.2 builder)
+# _resolve_ps_generation(), raw CD sector read (Part 1.2 builder)
 # ---------------------------------------------------------------------------
 
 class TestResolvePsGenerationFromSector:
@@ -147,7 +147,7 @@ class TestResolvePsGenerationFromSector:
     def test_pvd_present_no_system_cnf_resolves_unknown(self, tmp_path: Path):
         """PVD is valid and the root directory is readable, but it contains
         no SYSTEM.CNF entry at all. Must resolve "unknown", never a ps1
-        default — this is the already-fixed behavior the docstring calls out.
+        default, this is the already-fixed behavior the docstring calls out.
         """
         data = fx.build_ps_disc_bin(boot_line=None, include_system_cnf=False)
         path = tmp_path / "disc.bin"
@@ -162,7 +162,7 @@ class TestResolvePsGenerationFromSector:
 
 
 # ---------------------------------------------------------------------------
-# _classify_system_cnf() — BOOT= vs BOOT2= distinction
+# _classify_system_cnf(), BOOT= vs BOOT2= distinction
 # ---------------------------------------------------------------------------
 
 class TestClassifySystemCnf:

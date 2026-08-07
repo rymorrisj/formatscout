@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 
 # ── requires_install heuristic ───────────────────────────────────────────────
-# Heuristic — may need tuning post-beta. Covers the three cases the old
+# Heuristic, may need tuning post-beta. Covers the three cases the old
 # detect_media_type-based logic handled plus installer-only DOS directories.
 
 def _compute_requires_install(path: Path, era: str | None) -> bool:
@@ -73,7 +73,7 @@ def _detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> Scan
             reason="path does not exist",
         )
 
-    # Tier 1: hash lookup — highest confidence, return immediately on match
+    # Tier 1: hash lookup, highest confidence, return immediately on match
     try:
         result = _hash_lookup.lookup(path, _INDEX_PATH)
         if result is not None and result.era is not None:
@@ -94,7 +94,7 @@ def _detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> Scan
             )
         else:
             log.warning("Hash lookup failed for '%s': %s", path, exc, exc_info=True)
-        # empty or missing index — continue to signal detection
+        # empty or missing index, continue to signal detection
 
     if path.is_file():
         result = _detect_file(path, dir_cache)

@@ -5,7 +5,7 @@ Plain helper functions/constants, imported directly by test_classify.py and
 test_magic_detect.py, following this package's existing convention (see
 test_iso_detect.py) of local per-test-file imports over a shared conftest.py.
 
-hash_index.json in production is ~88MB — real DAT-derived data, never to be
+hash_index.json in production is ~88MB, real DAT-derived data, never to be
 loaded directly in a test. Every hash-index-shaped fixture here is a small,
 in-memory/tmp_path-only synthetic index built from scratch.
 """
@@ -17,7 +17,7 @@ import zlib
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Generic hash helpers — mirror hash_lookup.hash_file()'s algorithm exactly
+# Generic hash helpers, mirror hash_lookup.hash_file()'s algorithm exactly
 # (sha1/md5 over the full buffer, crc32 masked to unsigned 32-bit hex) so a
 # fixture file's real computed hash always matches what's baked into the
 # synthetic index below.
@@ -34,7 +34,7 @@ def hashes_for(content: bytes) -> dict[str, str]:
 
 def _synthetic_sha1(label: str) -> str:
     """Deterministic 40-hex key for an index entry that represents 'a record
-    already in the index under some other file's hash' — not derived from
+    already in the index under some other file's hash', not derived from
     any fixture file's real content, since that's the point of these entries.
     """
     return hashlib.sha1(f"peach1up-synthetic-fixture:{label}".encode()).hexdigest()
@@ -44,7 +44,7 @@ def patch_classify_index(monkeypatch, index_path: Path) -> None:
     """Points classify.py's module-level _INDEX_PATH constant at *index_path*
     for the duration of one test.
 
-    classify() has no index-path parameter of its own — unlike
+    classify() has no index-path parameter of its own, unlike
     fuzzy_title_match()/hash_lookup.lookup(), which both take index_path
     directly, classify() always reads its own private _INDEX_PATH module
     constant (pointing at the real hash_index.json). Monkeypatching that
@@ -73,7 +73,7 @@ def patch_detector_index(monkeypatch, index_path: Path) -> None:
     or another dispatch target directly) on a directory: detect()'s Tier-1
     hash_lookup.lookup() call reads and caches the real ~88MB hash_index.json
     on first use otherwise. Pointing at a tmp_path with no file at all is the
-    normal case here (not a synthetic index) — hash_lookup._load_cached()
+    normal case here (not a synthetic index), hash_lookup._load_cached()
     raises FileNotFoundError immediately for a missing path, which detect()
     already catches and falls through on, so this is the fast, minimal way to
     isolate a directory-dispatch test from the real index without building one.
@@ -84,7 +84,7 @@ def patch_detector_index(monkeypatch, index_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Part 1.1 — synthetic hash_index.json (5 entries)
+# Part 1.1, synthetic hash_index.json (5 entries)
 # ---------------------------------------------------------------------------
 
 VERIFIED_CONTENT = b"PEACH1UP_SYNTHETIC_VERIFIED_PS1_DISC"
@@ -98,9 +98,9 @@ TITLE_MATCH_ENTRY_SHA1 = _synthetic_sha1("title-match-entry-own-sha1")
 ERA_NONE_TRAP_SHA1 = _synthetic_sha1("era-none-trap-entry-own-sha1")
 
 TITLE_MATCH_INDEXED_TITLE = "Final Fantasy VII (USA)"
-# ratio (SequenceMatcher, normalized) vs TITLE_MATCH_INDEXED_TITLE == 0.8750 — above 0.80.
+# ratio (SequenceMatcher, normalized) vs TITLE_MATCH_INDEXED_TITLE == 0.8750, above 0.80.
 TITLE_QUERY_ABOVE_THRESHOLD = "Final Fantasy 7"
-# ratio vs TITLE_MATCH_INDEXED_TITLE == 0.6471 — below 0.80.
+# ratio vs TITLE_MATCH_INDEXED_TITLE == 0.6471, below 0.80.
 TITLE_QUERY_BELOW_THRESHOLD = "Fantasy Final VII"
 
 ERA_NONE_TRAP_TITLE = "Untracked PC Game (USA)"
@@ -112,21 +112,21 @@ def build_synthetic_index() -> dict[str, dict]:
     {sha1_hex: {title, platform, era, source, md5?, crc32?}}.
 
     Exactly 5 entries:
-      1. sha1-only — no md5/crc32 keys at all (mirrors a real record sourced
+      1. sha1-only, no md5/crc32 keys at all (mirrors a real record sourced
          from a DAT that only supplied sha1). Drives the "verified" tests.
       2. md5+crc32 populated, own sha1 unrelated to any fixture file's real
          hash. Drives both caution sub-tiers (md5-hit, crc32-hit) via two
          different source files that each collide on exactly one field.
       3. CHD-style, keyed by embedded rawsha1 rather than any file's real
          on-disk hash (chdman wraps/compresses, so a .chd's raw file hash
-         never equals the original dump's hash — see chd_validator.py).
-      4. title-match entry (era=ps1) — used by both the above- and
+         never equals the original dump's hash, see chd_validator.py).
+      4. title-match entry (era=ps1), used by both the above- and
          below-threshold fuzzy_title_match tests.
-      5. era=None trap — a title that fuzzy-matches trivially (it's the
+      5. era=None trap, a title that fuzzy-matches trivially (it's the
          exact indexed string) but carries no era. Used to prove classify()
          never turns this into a false "mismatch": fuzzy_title_match()
          fails closed on era=None rather than searching every era=None
-         record — a real, large bucket in production (e.g. the unmapped
+         record, a real, large bucket in production (e.g. the unmapped
          "IBM - PC compatible" DAT, see README's Current coverage state).
          If that guard were ever removed, this exact shape (matching title,
          no era) is what would start producing a false "mismatch".
@@ -251,7 +251,7 @@ def place_chd_metadata_entry(buf: bytearray, offset: int, tag: bytes, next_offse
 
 
 # ---------------------------------------------------------------------------
-# Part 1.2 — synthetic 2352-byte Mode-2 CD sector builder, for
+# Part 1.2, synthetic 2352-byte Mode-2 CD sector builder, for
 # magic_detect._resolve_ps_generation() / resolve_ps_generation_from_file()
 # ---------------------------------------------------------------------------
 
@@ -262,7 +262,7 @@ _CNF_LBA = 21
 
 
 def _dir_record(name: bytes, lba: int, size: int) -> bytes:
-    """Minimal ISO9660 directory record — only the fields
+    """Minimal ISO9660 directory record, only the fields
     magic_detect._resolve_ps_generation() actually reads: record length
     (offset 0), LBA (offset 2, LE), data length (offset 10, LE), file
     identifier length (offset 32), file identifier (offset 33+).
@@ -284,8 +284,8 @@ def build_ps_disc_bin(
     PVD at sector 16 (root dir at sector 20) and, when requested, a
     SYSTEM.CNF entry at sector 21 containing *boot_line*.
 
-    include_pvd=False — no PVD at all (sector 16 left zeroed, byte 0 != 1).
-    include_system_cnf=False — PVD present, but root dir has no SYSTEM.CNF
+    include_pvd=False, no PVD at all (sector 16 left zeroed, byte 0 != 1).
+    include_system_cnf=False, PVD present, but root dir has no SYSTEM.CNF
         entry (root dir sector left zeroed).
     """
     buf = bytearray((_CNF_LBA + 1) * SECTOR)
@@ -311,7 +311,7 @@ def build_ps_disc_bin(
 
 
 # ---------------------------------------------------------------------------
-# Part 1.3 — per-signature fixtures for magic_detect.detect_from_magic(),
+# Part 1.3, per-signature fixtures for magic_detect.detect_from_magic(),
 # magic bytes transcribed directly from magic_signatures.toml
 # ---------------------------------------------------------------------------
 
@@ -379,7 +379,7 @@ def build_pe_header(
 
 
 # ---------------------------------------------------------------------------
-# Part 2 — plain ISO 9660 image builder (2048 bytes/sector, no Mode-2/2352
+# Part 2, plain ISO 9660 image builder (2048 bytes/sector, no Mode-2/2352
 # raw-CD framing), for iso_detect.detect_from_pvd() / _root_dir_entry_names()
 # / _detect_from_xbe_scan(). Distinct from Part 1.2's Mode-2 BIN sector
 # builder above: detect_from_pvd() reads a plain .iso file directly at
@@ -418,12 +418,12 @@ def build_pvd_iso(
     PVD's own root LBA/size fields.
 
     root_entries reuses Part 1.2's _dir_record() builder (rec_len@0,
-    name_len@32, name@33+ — the only fields _root_dir_entry_names() reads),
+    name_len@32, name@33+, the only fields _root_dir_entry_names() reads),
     with dummy lba/size of 0 since detect_from_pvd()'s own directory-entry
     checks (PS3_DISC.SFB / .XBE scan) only ever look at the name.
 
     root_entries=None (the default) leaves root LBA/size at 0, matching a
-    disc with no directory data to scan — used for the plain volume-label/
+    disc with no directory data to scan, used for the plain volume-label/
     publisher/preparer keyword-match variants, where the structural checks
     (PS3_DISC.SFB, .xbe scan) must have nothing to match against.
     """
@@ -472,7 +472,7 @@ DOS_PUBLISHERS = (
 
 
 # ---------------------------------------------------------------------------
-# Part 3 — PS3/XEX folder-shape builders, for directory_detect.py's
+# Part 3, PS3/XEX folder-shape builders, for directory_detect.py's
 # is_disc_format_folder() / find_eboot() / find_default_xex() /
 # resolve_ps3_target() / resolve_xex_target() and the _detect_from_directory()
 # dispatch that delegates to them.
@@ -498,7 +498,7 @@ def build_ps3_disc_folder(tmp_path: Path, *, with_eboot: bool = True, name: str 
 
 
 def build_ps3_installed_folder(tmp_path: Path, *, name: str = "ps3_installed") -> Path:
-    """USRDIR/EBOOT.BIN directly under the folder, no PS3_DISC.SFB — the
+    """USRDIR/EBOOT.BIN directly under the folder, no PS3_DISC.SFB, the
     installed/extracted dev_hdd0/game/<TITLE_ID>/ shape.
     """
     folder = tmp_path / name
@@ -509,13 +509,13 @@ def build_ps3_installed_folder(tmp_path: Path, *, name: str = "ps3_installed") -
 
 
 def build_non_ps3_folder(tmp_path: Path, *, name: str = "not_ps3") -> Path:
-    """Neither PS3_DISC.SFB nor a resolvable EBOOT.BIN present — negative case.
+    """Neither PS3_DISC.SFB nor a resolvable EBOOT.BIN present, negative case.
 
     Uses a .bin filename deliberately: directory_detect._detect_from_directory()
     has a generic "DOS-only extensions" fallback heuristic keyed off a fixed
     extension set ({.exe, .com, .bat, .cfg, .txt, .ini, ""}) that would
     misclassify this folder as era="dos" if given a .txt/.exe/etc. file
-    instead — .bin isn't in that set, so this fixture stays a clean "no
+    instead, .bin isn't in that set, so this fixture stays a clean "no
     signal" negative case for the PS3/XEX resolvers specifically.
     """
     folder = tmp_path / name

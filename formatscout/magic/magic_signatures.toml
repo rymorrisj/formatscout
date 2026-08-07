@@ -1,15 +1,15 @@
-# Peach 1UP — Magic Number Signature Table
+# Peach 1UP, Magic Number Signature Table
 # Each entry identifies a platform from binary signatures at known offsets.
 # Fields:
-#   era        — era slug matched against known eras in the system
-#   offset     — byte offset to seek to before reading
-#   magic      — hex string of expected bytes (space-separated octets, case-insensitive)
-#   reason     — human-readable string shown in the UI
-#   applies_to — list of file extensions this signature applies to (without dot)
-#   note       — optional, for community contributors
+#   era       , era slug matched against known eras in the system
+#   offset    , byte offset to seek to before reading
+#   magic     , hex string of expected bytes (space-separated octets, case-insensitive)
+#   reason    , human-readable string shown in the UI
+#   applies_to, list of file extensions this signature applies to (without dot)
+#   note      , optional, for community contributors
 #
 # To add a new signature: append a [[signatures]] block and restart the backend.
-# Magic bytes must match exactly at the given offset — no wildcards.
+# Magic bytes must match exactly at the given offset, no wildcards.
 # Community contributions welcome via pull request.
 
 # ── CD-ROM Mode 2 sync pattern (PS1/PS2-ambiguous) ────────────────────────────
@@ -47,7 +47,7 @@ note = "GD-ROM IP.BIN header. Present on all licensed Dreamcast discs."
 era = "n64"
 offset = 0x00
 magic = "80 37 12 40"
-reason = "N64 ROM magic — big-endian format (.z64)"
+reason = "N64 ROM magic, big-endian format (.z64)"
 applies_to = ["bin", "n64", "z64"]
 note = "Big-endian is the native N64 format."
 
@@ -55,7 +55,7 @@ note = "Big-endian is the native N64 format."
 era = "n64"
 offset = 0x00
 magic = "37 80 40 12"
-reason = "N64 ROM magic — byteswapped format (.v64)"
+reason = "N64 ROM magic, byteswapped format (.v64)"
 applies_to = ["bin", "v64"]
 note = "Byteswapped format produced by some dumping tools."
 
@@ -63,7 +63,7 @@ note = "Byteswapped format produced by some dumping tools."
 era = "n64"
 offset = 0x00
 magic = "40 12 37 80"
-reason = "N64 ROM magic — little-endian format"
+reason = "N64 ROM magic, little-endian format"
 applies_to = ["bin"]
 note = "Little-endian format, less common."
 
@@ -78,5 +78,5 @@ applies_to = ["bin", "nes"]
 note = "Standard iNES format used by all major NES ROM dumps."
 
 # ── DOS / PC CD-ROM ───────────────────────────────────────────────────────────
-# No reliable magic number for generic DOS ISOs — use PVD publisher/volume label instead.
+# No reliable magic number for generic DOS ISOs, use PVD publisher/volume label instead.
 # Size-based DOS fallback removed; ambiguous cases return no signal.

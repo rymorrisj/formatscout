@@ -6,12 +6,12 @@ from ..result import ScanResult
 _CHD_MAGIC = b"MComprHD"
 _META_CHTR = b"CHTR"
 _META_CHT2 = b"CHT2"
-_META_CHGD = b"CHGD"  # GD-ROM track — Dreamcast only
+_META_CHGD = b"CHGD"  # GD-ROM track, Dreamcast only
 
 _META_OFFSET_POS = 48
 
 # CHD v5 fixed header layout (chd.h): rawsha1 is the SHA1 of the raw/uncompressed
-# hunk data — the value that matches Redump's published per-image hash. The
+# hunk data, the value that matches Redump's published per-image hash. The
 # adjacent `sha1` field (offset 84) additionally folds in metadata and will not
 # match Redump, so it is intentionally not used here.
 _RAWSHA1_OFFSET = 64
@@ -21,7 +21,7 @@ _RAWSHA1_LEN = 20
 # Used only to distinguish CD-sized (PS1) from DVD-sized (PS2) media when the
 # CHTR/CHT2 tag alone can't tell them apart.
 _LOGICAL_BYTES_OFFSET = 32
-_CD_SIZE_THRESHOLD = 800 * 1024 * 1024  # ~800 MB — independent heuristic; iso_detect.py uses a separate 4.7 GB PS1/PS2 boundary
+_CD_SIZE_THRESHOLD = 800 * 1024 * 1024  # ~800 MB, independent heuristic; iso_detect.py uses a separate 4.7 GB PS1/PS2 boundary
 
 # Defends the metadata-chain walk below against a crafted file whose next_offset
 # chain cycles or wanders past EOF: real CHD files have a handful of metadata
@@ -33,9 +33,9 @@ def extract_embedded_sha1(path: Path) -> str | None:
     """
     Read the CHD v5 header's embedded rawsha1 field via fixed-offset parsing.
 
-    No hunk decompression — this only reads header bytes. Returns None on any
+    No hunk decompression, this only reads header bytes. Returns None on any
     read error, on a header too short to contain the field, or on an
-    all-zero field (unset — some chdman versions omit it for non-CD types).
+    all-zero field (unset, some chdman versions omit it for non-CD types).
     """
     try:
         with path.open("rb") as fh:
@@ -67,7 +67,7 @@ def detect(path: Path) -> ScanResult:
             if fh.read(8) != _CHD_MAGIC:
                 return ScanResult(
                     title=None, platform=None, era=None, confidence=0.0,
-                    reason="CHD magic bytes not found — not a valid CHD file",
+                    reason="CHD magic bytes not found, not a valid CHD file",
                 )
 
             fh.seek(_META_OFFSET_POS)
@@ -75,7 +75,7 @@ def detect(path: Path) -> ScanResult:
             if len(raw) < 8:
                 return ScanResult(
                     title=None, platform=None, era=None, confidence=0.0,
-                    reason="CHD header truncated — could not read metadata offset",
+                    reason="CHD header truncated, could not read metadata offset",
                 )
             meta_offset = struct.unpack(">Q", raw)[0]
 
@@ -88,9 +88,9 @@ def detect(path: Path) -> ScanResult:
 
             while meta_offset != 0:
                 if len(visited_offsets) >= _MAX_METADATA_ENTRIES or meta_offset in visited_offsets:
-                    break  # cycle or pathologically long chain — bail out rather than spin
+                    break  # cycle or pathologically long chain, bail out rather than spin
                 if meta_offset < 0 or meta_offset >= file_size:
-                    break  # next_offset points outside the file — malformed/crafted chain
+                    break  # next_offset points outside the file, malformed/crafted chain
                 visited_offsets.add(meta_offset)
 
                 fh.seek(meta_offset)
@@ -108,12 +108,12 @@ def detect(path: Path) -> ScanResult:
                     )
 
                 if tag in (_META_CHTR, _META_CHT2):
-                    # CHTR/CHT2 only means "standard CD/DVD track" — it does NOT
+                    # CHTR/CHT2 only means "standard CD/DVD track", it does NOT
                     # distinguish PS1 from PS2 (both use this tag). A real fix
                     # requires decompressing the CHD to inspect SYSTEM.CNF, which
                     # is out of scope (separate backlog item). As a heuristic,
                     # use the header's logical (uncompressed) size to guess
-                    # CD-sized (PS1) vs DVD-sized (PS2) — still not authoritative
+                    # CD-sized (PS1) vs DVD-sized (PS2), still not authoritative
                     # like the CHGD/hash-index/magic-byte paths.
                     if logical_bytes and logical_bytes <= _CD_SIZE_THRESHOLD:
                         era, size_desc = "ps1", f"{logical_bytes} bytes, CD-sized"

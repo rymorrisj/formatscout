@@ -31,7 +31,7 @@ def _classify_system_cnf(content: str) -> str:
 def resolve_ps_generation_from_file(cnf_path: Path) -> str:
     """
     Classify PS1 vs PS2 from an already-extracted SYSTEM.CNF file on disk
-    (directory-based items — no CD sector arithmetic needed since the file
+    (directory-based items, no CD sector arithmetic needed since the file
     is directly readable). Same BOOT/BOOT2 marker logic as _resolve_ps_generation.
 
     Returns "unknown" (never a guessed console) if the file cannot be read.

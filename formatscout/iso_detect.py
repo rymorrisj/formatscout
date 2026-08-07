@@ -93,7 +93,7 @@ def detect_from_pvd(iso_path: Path) -> ScanResult:
         if "PS3_DISC.SFB" in _root_dir_entry_names(dir_data):
             return ScanResult(
                 title=None, platform=None, era="ps3", confidence=0.9,
-                reason="ISO 9660 root directory contains PS3_DISC.SFB — PS3 disc image",
+                reason="ISO 9660 root directory contains PS3_DISC.SFB, PS3 disc image",
             )
 
         xbe_result = _detect_from_xbe_scan(dir_data)
@@ -196,7 +196,7 @@ def _detect_from_xbe_scan(dir_data: bytes) -> ScanResult:
         if name.endswith(".XBE"):
             return ScanResult(
                 title=None, platform=None, era="xbox", confidence=0.8,
-                reason="ISO filesystem contains .xbe — Original Xbox executable",
+                reason="ISO filesystem contains .xbe, Original Xbox executable",
             )
     return _null
 
@@ -210,13 +210,13 @@ def _iso_size_fallback(path: Path) -> ScanResult:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.2,
             reason="ISO exceeds 4 GB but no PVD signal",
-            warnings=["could be PS2 or Xbox OG — please select era manually"],
+            warnings=["could be PS2 or Xbox OG, please select era manually"],
         )
     if size < 800 * 1024 * 1024:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.2,
             reason="ISO under 800 MB but no PVD signal",
-            warnings=["era ambiguous — please select era manually"],
+            warnings=["era ambiguous, please select era manually"],
         )
     return ScanResult(title=None, platform=None, era=None, confidence=0.0, reason="no signal found")
 

@@ -12,18 +12,18 @@ class MediaTarget:
     and backend.service.backends.xenia for the two consumers).
 
     kind:
-        "file" — a single launchable file, no folder-shape resolution needed.
-        "disc_folder" — a folder identified by a disc-format structural marker
+        "file", a single launchable file, no folder-shape resolution needed.
+        "disc_folder", a folder identified by a disc-format structural marker
             (e.g. PS3_DISC.SFB); RPCS3's own "Boot Game" walks the folder
             itself, not a resolved boot file.
-        "installed_dir" — a folder with no disc marker but a resolvable boot
+        "installed_dir", a folder with no disc marker but a resolvable boot
             file at a known relative layout (e.g. dev_hdd0/game/<ID>/USRDIR/EBOOT.BIN).
-        "xex_folder" — an extracted Xbox 360 folder resolved to its bootable
+        "xex_folder", an extracted Xbox 360 folder resolved to its bootable
             .xex file.
 
     detect_path: what classify()/hash_file() should hash for verification.
         For "disc_folder"/"installed_dir" this is the resolved boot file
-        (e.g. EBOOT.BIN), not the folder — a folder can never be hashed.
+        (e.g. EBOOT.BIN), not the folder, a folder can never be hashed.
     launch_path: what gets handed to the emulator. For "disc_folder"/
         "installed_dir" this is the folder itself (RPCS3 does its own
         internal walk); for "xex_folder" and "file" it is the same file as

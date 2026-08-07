@@ -29,7 +29,7 @@ class TestIsDiscFormatFolder:
         assert is_disc_format_folder(folder) is False
 
     def test_false_when_marker_is_a_directory_not_a_file(self, tmp_path: Path):
-        """PS3_DISC.SFB as a directory, not a file, must not count — the
+        """PS3_DISC.SFB as a directory, not a file, must not count, the
         check is explicitly is_file()."""
         from backend.service.utils.smart_media_detector.directory_detect import is_disc_format_folder
         folder = tmp_path / "weird"
@@ -98,7 +98,7 @@ class TestFindDefaultXex:
 
 
 # ---------------------------------------------------------------------------
-# resolve_ps3_target() — the single resolver for both PS3 folder shapes
+# resolve_ps3_target(), the single resolver for both PS3 folder shapes
 # ---------------------------------------------------------------------------
 
 class TestResolvePs3Target:
@@ -129,7 +129,7 @@ class TestResolvePs3Target:
 
     def test_disc_marker_without_eboot_returns_none(self, tmp_path: Path):
         """The original bug's exact case, at the resolver level: PS3_DISC.SFB
-        present but no findable EBOOT.BIN is not a valid target — must return
+        present but no findable EBOOT.BIN is not a valid target, must return
         None rather than trusting the SFB marker alone.
         """
         from backend.service.utils.smart_media_detector.directory_detect import resolve_ps3_target
@@ -149,7 +149,7 @@ class TestResolvePs3Target:
 
 
 # ---------------------------------------------------------------------------
-# resolve_xex_target() — the single resolver for the XEX folder shape
+# resolve_xex_target(), the single resolver for the XEX folder shape
 # ---------------------------------------------------------------------------
 
 class TestResolveXexTarget:
@@ -181,7 +181,7 @@ class TestResolveXexTarget:
 # ---------------------------------------------------------------------------
 # _detect_from_directory() delegates to resolve_ps3_target()/resolve_xex_target()
 # rather than re-deriving the SFB/EBOOT/XEX checks inline (the consolidation
-# fix itself, not just its outcome) — pinned via monkeypatched resolvers so a
+# fix itself, not just its outcome), pinned via monkeypatched resolvers so a
 # future regression back to inline duplicated logic would break this test
 # even if the inline logic happened to produce the same result.
 # ---------------------------------------------------------------------------
@@ -237,7 +237,7 @@ class TestDetectFromDirectoryDelegatesToResolvers:
 
 
 # ---------------------------------------------------------------------------
-# _detect_from_directory() — the PS3/XEX regression pin, unpatched end-to-end.
+# _detect_from_directory(), the PS3/XEX regression pin, unpatched end-to-end.
 # Case 3 (SFB, no EBOOT) is the exact original bug reproduction.
 # ---------------------------------------------------------------------------
 
@@ -267,7 +267,7 @@ class TestDetectFromDirectoryPs3XexRegression:
         PS3_DISC.SFB but no findable EBOOT.BIN anywhere must not be
         confidently classified as era=ps3. Before the fix, this branch
         trusted the SFB marker alone and returned era=ps3, confidence=0.9
-        even with no bootable file — an unbootable folder would have reached
+        even with no bootable file, an unbootable folder would have reached
         RPCS3 before failing there instead of failing here.
         """
         from backend.service.utils.smart_media_detector.directory_detect import _detect_from_directory
@@ -290,7 +290,7 @@ class TestDetectFromDirectoryPs3XexRegression:
 
 # ---------------------------------------------------------------------------
 # Second half of the original bug: a raw extracted XEX folder must resolve
-# to era=xbox360, not confidence=0.0 — through both detect_directory() and
+# to era=xbox360, not confidence=0.0, through both detect_directory() and
 # the full public detect() entry point.
 # ---------------------------------------------------------------------------
 
@@ -325,7 +325,7 @@ class TestXexFolderEndToEnd:
 
 
 # ---------------------------------------------------------------------------
-# _detect_from_pe() — confirmed untouched by the consolidation fix: still has
+# _detect_from_pe(), confirmed untouched by the consolidation fix: still has
 # its own Subsystem gate, still a distinct function from exe_detect.detect_exe()
 # even though both now compute the same PE-header classification independently.
 # ---------------------------------------------------------------------------
@@ -375,7 +375,7 @@ class TestDetectFromPe:
     def test_agrees_with_exe_detect_detect_exe_for_the_same_header(self, tmp_path: Path):
         """directory_detect._detect_from_pe() and exe_detect.detect_exe() now
         compute the same PE-subsystem/version classification via independent,
-        duplicated code paths, not delegation — confirm they still agree
+        duplicated code paths, not delegation, confirm they still agree
         rather than having silently diverged.
         """
         from backend.service.utils.smart_media_detector.exe_detect import detect_exe
@@ -391,7 +391,7 @@ class TestDetectFromPe:
 
 
 # ---------------------------------------------------------------------------
-# _parse_autorun_exe() — read cap fix from the perf pass (commit 98ce932):
+# _parse_autorun_exe(), read cap fix from the perf pass (commit 98ce932):
 # _POINTER_FILE_READ_CAP_BYTES (imported from iso_detect.py) must actually
 # cap the read, not just exist as an unused constant.
 # ---------------------------------------------------------------------------
@@ -427,7 +427,7 @@ class TestParseAutorunExe:
     def test_directive_beyond_read_cap_is_never_seen(self, tmp_path: Path):
         """Regression for the perf-pass read cap: _POINTER_FILE_READ_CAP_BYTES
         must actually cap the read at that many bytes. A real OPEN= directive
-        placed after that boundary must not be found — proof the file is
+        placed after that boundary must not be found, proof the file is
         genuinely truncated/capped on read, not fully read regardless of size.
         """
         from backend.service.utils.smart_media_detector.directory_detect import (
@@ -443,7 +443,7 @@ class TestParseAutorunExe:
 
     def test_directive_within_read_cap_is_still_found(self, tmp_path: Path):
         """Sanity control for the cap test above: a directive comfortably
-        inside the cap, on an otherwise large file, is still found — the cap
+        inside the cap, on an otherwise large file, is still found, the cap
         truncates the read, it doesn't break normal parsing.
         """
         from backend.service.utils.smart_media_detector.directory_detect import (

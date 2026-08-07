@@ -15,7 +15,7 @@ def detect_exe(exe_path: Path) -> ScanResult:
         if len(header) < 0x40:
             return ScanResult(
                 title=None, platform=None, era="dos", confidence=0.65,
-                reason="MZ header present, too short for a PE offset — DOS executable",
+                reason="MZ header present, too short for a PE offset, DOS executable",
             )
 
         pe_offset = struct.unpack_from("<I", header, 0x3C)[0]
@@ -24,7 +24,7 @@ def detect_exe(exe_path: Path) -> ScanResult:
         if header[pe_offset: pe_offset + 4] != b"PE\x00\x00":
             return ScanResult(
                 title=None, platform=None, era="dos", confidence=0.65,
-                reason="MZ header present, no PE signature — DOS executable",
+                reason="MZ header present, no PE signature, DOS executable",
             )
 
         # Optional header offset 68 = Subsystem; offset 40 = MajorOperatingSystemVersion
@@ -37,12 +37,12 @@ def detect_exe(exe_path: Path) -> ScanResult:
         if major_os >= 5:
             return ScanResult(
                 title=None, platform=None, era="winxp", confidence=0.75,
-                reason=f"PE MajorOSVersion={major_os} — Windows XP era executable",
+                reason=f"PE MajorOSVersion={major_os}, Windows XP era executable",
             )
         if major_os == 4:
             return ScanResult(
                 title=None, platform=None, era="win98", confidence=0.75,
-                reason=f"PE MajorOSVersion={major_os} — Windows 9x era executable",
+                reason=f"PE MajorOSVersion={major_os}, Windows 9x era executable",
             )
         return _null
     except Exception as exc:

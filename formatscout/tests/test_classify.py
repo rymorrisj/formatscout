@@ -100,7 +100,7 @@ class TestDispatchStates:
 
 
 # ---------------------------------------------------------------------------
-# is_chd carve-out — md5/crc32 tiers must be skipped entirely for .chd
+# is_chd carve-out, md5/crc32 tiers must be skipped entirely for .chd
 # ---------------------------------------------------------------------------
 
 class TestChdCarveOut:
@@ -123,7 +123,7 @@ class TestChdCarveOut:
         the `if not is_chd:` guard in classify.py, this would return
         "caution". With the guard, the md5/crc32 tiers are skipped outright
         for any .chd (chdman compresses/wraps, so raw-byte md5/crc32 are as
-        meaningless as raw-byte sha1 for a CHD — same reasoning as
+        meaningless as raw-byte sha1 for a CHD, same reasoning as
         hash_lookup.lookup()), so this must fall through past caution.
         """
         index_path = fx.write_synthetic_index(tmp_path)
@@ -144,7 +144,7 @@ class TestChdCarveOut:
 
 
 # ---------------------------------------------------------------------------
-# "mismatch must never fire falsely" guarantee — era=None fail-closed
+# "mismatch must never fire falsely" guarantee, era=None fail-closed
 # ---------------------------------------------------------------------------
 
 class TestMismatchNeverFiresFalsely:
@@ -157,7 +157,7 @@ class TestMismatchNeverFiresFalsely:
         "mismatch" if fuzzy_title_match()'s `if not title or not era: return
         None` guard were ever removed: a None era would then only filter
         hash_index entries down to other era=None records instead of being
-        rejected outright — and era=None is a large real bucket in
+        rejected outright, and era=None is a large real bucket in
         production (e.g. the unmapped "IBM - PC compatible" DAT, see the
         package README's Current coverage state section), not a rare edge.
         """
