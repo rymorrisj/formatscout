@@ -27,8 +27,11 @@ class TestHashFile:
         path.write_bytes(fx.VERIFIED_CONTENT)
 
         result = _hash_lookup_module().hash_file(path)
+        expected = fx.hashes_for(fx.VERIFIED_CONTENT)
 
-        assert result == fx.hashes_for(fx.VERIFIED_CONTENT)
+        assert result.sha1 == expected["sha1"]
+        assert result.md5 == expected["md5"]
+        assert result.crc32 == expected["crc32"]
 
 
 # ---------------------------------------------------------------------------

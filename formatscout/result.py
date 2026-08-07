@@ -1,43 +1,18 @@
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Literal
 
 
 @dataclass(slots=True, frozen=True)
-class MediaTarget:
-    """A resolved, launchable media shape, produced once by a resolver in this
-    package (resolve_ps3_target, resolve_xex_target) and consumed by both the
-    ingest/detection layer and a launch backend, instead of each independently
-    re-deriving the same folder-shape logic (see backend.service.backends.rpcs3
-    and backend.service.backends.xenia for the two consumers).
-
-    kind:
-        "file", a single launchable file, no folder-shape resolution needed.
-        "disc_folder", a folder identified by a disc-format structural marker
-            (e.g. PS3_DISC.SFB); RPCS3's own "Boot Game" walks the folder
-            itself, not a resolved boot file.
-        "installed_dir", a folder with no disc marker but a resolvable boot
-            file at a known relative layout (e.g. dev_hdd0/game/<ID>/USRDIR/EBOOT.BIN).
-        "xex_folder", an extracted Xbox 360 folder resolved to its bootable
-            .xex file.
-
-    detect_path: what classify()/hash_file() should hash for verification.
-        For "disc_folder"/"installed_dir" this is the resolved boot file
-        (e.g. EBOOT.BIN), not the folder, a folder can never be hashed.
-    launch_path: what gets handed to the emulator. For "disc_folder"/
-        "installed_dir" this is the folder itself (RPCS3 does its own
-        internal walk); for "xex_folder" and "file" it is the same file as
-        detect_path.
-    license_files: sibling license files discovered alongside a "file"-kind
-        target (today: .rap files next to a PS3 .pkg). Empty for every other
-        kind.
+class HashFileResult:
+    """hash_file()'s result: the three hashes computed from a single read of
+    a file's bytes (hashing/hash_lookup.py), used directly by callers that
+    need a raw hash rather than a full detection/verification/classification
+    result, and internally by lookup(), verify(), and classify() as the
+    shared hashing primitive underneath all three.
     """
-    kind: Literal["file", "disc_folder", "installed_dir", "xex_folder"]
-    detect_path: Path
-    launch_path: Path
-    era: str | None
-    requires_install: bool
-    license_files: tuple[Path, ...] = ()
+    sha1: str
+    md5: str
+    crc32: str
 
 
 @dataclass(slots=True)

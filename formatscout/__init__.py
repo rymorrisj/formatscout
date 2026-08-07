@@ -1,10 +1,11 @@
 from .classify import classify
 from .detector import detect
-from .directory_detect import resolve_ps3_target, resolve_xex_target
-from .result import ClassifyResult, MediaTarget, ScanResult, VerifyResult
+from .hashing.hash_lookup import hash_file
+from .result import ClassifyResult, HashFileResult, ScanResult, VerifyResult
+from .validators.chd_validator import extract_embedded_sha1
 from .verify import verify
 
 __all__ = [
     "detect", "ScanResult", "verify", "VerifyResult", "classify", "ClassifyResult",
-    "MediaTarget", "resolve_ps3_target", "resolve_xex_target",
+    "hash_file", "HashFileResult", "extract_embedded_sha1",
 ]

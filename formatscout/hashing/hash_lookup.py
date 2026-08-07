@@ -3,7 +3,7 @@ import json
 import zlib
 from pathlib import Path
 
-from ..result import ScanResult
+from ..result import HashFileResult, ScanResult
 from ..validators.chd_validator import extract_embedded_sha1
 
 _CHUNK = 65536
@@ -13,7 +13,7 @@ _CHUNK = 65536
 _index_cache: dict[Path, tuple[float, dict, dict, dict]] = {}
 
 
-def hash_file(path: Path) -> dict:
+def hash_file(path: Path) -> HashFileResult:
     sha1 = hashlib.sha1()
     md5 = hashlib.md5()
     crc = 0
@@ -24,11 +24,11 @@ def hash_file(path: Path) -> dict:
             md5.update(chunk)
             crc = zlib.crc32(chunk, crc)
 
-    return {
-        "sha1": sha1.hexdigest(),
-        "md5": md5.hexdigest(),
-        "crc32": format(crc & 0xFFFFFFFF, "08x"),
-    }
+    return HashFileResult(
+        sha1=sha1.hexdigest(),
+        md5=md5.hexdigest(),
+        crc32=format(crc & 0xFFFFFFFF, "08x"),
+    )
 
 
 def lookup(path: Path, index_path: Path) -> ScanResult | None:
@@ -57,34 +57,34 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
 
     hashes = hash_file(path)
 
-    entry = index.get(hashes["sha1"])
+    entry = index.get(hashes.sha1)
     if entry is not None:
         return ScanResult(
             title=entry.get("title"),
             platform=entry.get("platform"),
             era=entry.get("era"),
             confidence=1.0,
-            reason=f"sha1 match: {hashes['sha1']}",
+            reason=f"sha1 match: {hashes.sha1}",
         )
 
-    entry = md5_index.get(hashes["md5"])
+    entry = md5_index.get(hashes.md5)
     if entry is not None:
         return ScanResult(
             title=entry.get("title"),
             platform=entry.get("platform"),
             era=entry.get("era"),
             confidence=0.85,
-            reason=f"md5 match: {hashes['md5']}",
+            reason=f"md5 match: {hashes.md5}",
         )
 
-    entry = crc32_index.get(hashes["crc32"])
+    entry = crc32_index.get(hashes.crc32)
     if entry is not None:
         return ScanResult(
             title=entry.get("title"),
             platform=entry.get("platform"),
             era=entry.get("era"),
             confidence=0.75,
-            reason=f"crc32 match: {hashes['crc32']}",
+            reason=f"crc32 match: {hashes.crc32}",
         )
 
     return None

@@ -1,143 +1,11 @@
-import logging
 import struct
 from pathlib import Path
 
 from .iso_detect import _POINTER_FILE_READ_CAP_BYTES
-from .result import MediaTarget, ScanResult
-
-log = logging.getLogger(__name__)
+from .result import ScanResult
 
 _WINDOWS_MARKERS = frozenset({"WINDOWS", "WIN", "SYSTEM", "SYSTEM32", "PROGRAM FILES", "PROGRA~1"})
 _DOS_TOOLS = frozenset({"DEICE.EXE", "PKUNZIP.EXE", "PKUNZIP.COM", "LZMA.EXE"})
-
-# PS3_DISC.SFB at a folder's root (alongside PS3_GAME/, optionally PS3_UPDATE/)
-# marks the folder as a disc-format dump. RPCS3's own "Boot Game" targets the
-# folder itself in this case and does its own internal walk, so the folder is
-# the launch unit, not a resolved EBOOT.BIN, a distinct shape from the
-# dev_hdd0/game/<TITLE_ID>/ and loose extracted folders find_eboot resolves.
-# Moved here from backend.service.backends.rpcs3 (was a backend-into-detector
-# import, backwards from this package's standalone-vendorable goal): this
-# package is the natural, dependency-free home for a structural folder-shape
-# check, and rpcs3.py now imports it from here instead.
-_PS3_DISC_MARKER_FILENAME = "PS3_DISC.SFB"
-
-
-def is_disc_format_folder(folder: Path) -> bool:
-    """Return True if *folder* is a disc-format dump (has PS3_DISC.SFB at its root)."""
-    return (folder / _PS3_DISC_MARKER_FILENAME).is_file()
-
-
-def find_eboot(folder: Path) -> Path | None:
-    """Return the EBOOT.BIN path for *folder*, checking both known layouts.
-
-    dev_hdd0/game/<TITLE_ID>/ folders (installed pkgs) hold USRDIR directly;
-    extracted disc folders hold it one level down, under PS3_GAME/.
-    """
-    for candidate in (folder / "USRDIR" / "EBOOT.BIN", folder / "PS3_GAME" / "USRDIR" / "EBOOT.BIN"):
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def resolve_ps3_target(folder: Path) -> MediaTarget | None:
-    """Resolve *folder* to a PS3 MediaTarget if it matches a known PS3 folder shape.
-
-    The single resolver for both PS3 folder shapes, called once from both the
-    ingest/detection layer (backend.service.games.items.best_detect_path) and
-    the launch backend (backend.service.backends.rpcs3.launch), instead of
-    each independently reimplementing the is_disc_format_folder/find_eboot
-    check (the C4 inversion this package used to require a backend import
-    for).
-
-    A real, bootable EBOOT.BIN must exist for either shape to resolve, a
-    folder with PS3_DISC.SFB but no findable EBOOT.BIN is not a valid target
-    and returns None here, the same as a folder with neither signal. This is
-    deliberate: the disc-format branch used to trust the SFB marker alone and
-    skip this check, letting an unbootable folder reach RPCS3 before failing
-    there instead of here.
-
-    detect_path is always the resolved EBOOT.BIN (what classify()/hash_file()
-    should hash); launch_path is always the folder itself (what RPCS3 is
-    handed, it does its own internal walk from the folder root for both
-    shapes). era is resolved structurally here, not by suffix-dispatching
-    the returned EBOOT.BIN through detect()'s generic .bin handling, calling
-    detect() on *folder* directly (which reaches this same structural check
-    via detect_directory) is how a caller should get a ScanResult for a PS3
-    folder, never detect() on the EBOOT.BIN file.
-
-    Returns:
-        None if *folder* is not a directory or has no resolvable PS3 shape.
-    """
-    if not folder.is_dir():
-        return None
-    eboot = find_eboot(folder)
-    if eboot is None:
-        return None
-    kind = "disc_folder" if is_disc_format_folder(folder) else "installed_dir"
-    return MediaTarget(
-        kind=kind, detect_path=eboot, launch_path=folder,
-        era="ps3", requires_install=False, license_files=(),
-    )
-
-
-def resolve_xex_target(folder: Path) -> MediaTarget | None:
-    """Resolve *folder* to an Xbox 360 MediaTarget if it contains a bootable XEX.
-
-    The single resolver for the XEX folder shape, called once from both the
-    ingest/detection layer (backend.service.games.items.best_detect_path) and
-    the launch backend (backend.service.backends.xenia.launch) instead of
-    each independently calling find_default_xex. Unlike PS3, detect_path and
-    launch_path are the same file here, Xenia is handed the resolved .xex
-    directly, not the containing folder.
-
-    Returns:
-        None if *folder* is not a directory or contains no .xex file.
-    """
-    if not folder.is_dir():
-        return None
-    xex = find_default_xex(folder)
-    if xex is None:
-        return None
-    return MediaTarget(
-        kind="xex_folder", detect_path=xex, launch_path=xex,
-        era="xbox360", requires_install=False, license_files=(),
-    )
-
-
-def find_default_xex(folder: Path) -> Path | None:
-    """Return the launchable .xex path for an extracted Xbox 360 XEX folder.
-
-    Prefers an exact "default.xex" match (case-insensitive) at the folder's
-    top level, the conventional entry point Xenia itself looks for. If no
-    default.xex exists but other .xex files are present, falls back to the
-    alphabetically first one by filename, chosen deterministically rather
-    than by filesystem iteration order, and logs a warning since this is a
-    tie-break, not a confirmed match, and the wrong title could otherwise
-    launch silently.
-
-    Public (not module-private): the underlying lookup resolve_xex_target
-    (above) wraps for both of its callers. Kept importable on its own too,
-    since resolve_xex_target's MediaTarget wrapping is XEX-specific and a
-    caller that only wants the raw path lookup shouldn't have to unwrap it.
-    """
-    try:
-        xex_files = [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() == ".xex"]
-    except OSError:
-        return None
-    if not xex_files:
-        return None
-    for f in xex_files:
-        if f.name.lower() == "default.xex":
-            return f
-    xex_files.sort(key=lambda f: f.name.lower())
-    chosen = xex_files[0]
-    log.warning(
-        "xex resolver: no default.xex found in '%s', %d other .xex file(s) present, "
-        "deterministically choosing '%s' (alphabetically first) as a tie-break. "
-        "Rename the intended file to default.xex to avoid relying on this.",
-        folder, len(xex_files), chosen.name,
-    )
-    return chosen
 
 
 def detect_directory(path: Path) -> ScanResult:
@@ -242,32 +110,6 @@ def _detect_from_directory(root: Path) -> ScanResult:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
             reason="cannot list directory",
-        )
-
-    # Delegates to resolve_ps3_target for both PS3 folder shapes (disc-format
-    # dump with PS3_DISC.SFB, or an installed/extracted dev_hdd0/game/<ID>/
-    # layout) rather than re-deriving the SFB/EBOOT check inline. A folder
-    # with PS3_DISC.SFB but no resolvable EBOOT.BIN is not a valid PS3 target
-    # and falls through to the remaining dispatch below, matching
-    # resolve_ps3_target's own contract instead of trusting the SFB marker
-    # alone.
-    ps3_target = resolve_ps3_target(root)
-    if ps3_target is not None:
-        if ps3_target.kind == "disc_folder":
-            return ScanResult(
-                title=None, platform=None, era="ps3", confidence=0.9,
-                reason="directory root contains PS3_DISC.SFB, PS3 disc dump",
-            )
-        return ScanResult(
-            title=None, platform=None, era="ps3", confidence=0.85,
-            reason="directory contains USRDIR/EBOOT.BIN (optionally under PS3_GAME/), installed or extracted PS3 title",
-        )
-
-    xex_target = resolve_xex_target(root)
-    if xex_target is not None:
-        return ScanResult(
-            title=None, platform=None, era="xbox360", confidence=0.85,
-            reason="directory contains a bootable .xex file (default.xex or resolved fallback)",
         )
 
     if "XPSP" in entries or "I386" in entries:

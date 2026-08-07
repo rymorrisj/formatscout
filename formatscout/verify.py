@@ -14,7 +14,7 @@ def verify(path: Path, expected_sha1: str) -> VerifyResult:
     hash_file() for a placed-file check, just against the bundled hash
     index instead of one hardcoded hash.
     """
-    computed_sha1 = _hash_lookup.hash_file(path)["sha1"]
+    computed_sha1 = _hash_lookup.hash_file(path).sha1
 
     try:
         index, _md5_index, _crc32_index = _hash_lookup._load_cached(_INDEX_PATH)

@@ -25,7 +25,7 @@ def classify(
             reason=f"could not hash file: {exc}",
         )
 
-    computed_sha1 = hashes["sha1"]
+    computed_sha1 = hashes.sha1
 
     try:
         index, md5_index, crc32_index = _hash_lookup._load_cached(_INDEX_PATH)
@@ -53,15 +53,15 @@ def classify(
         )
 
     if not is_chd:
-        if hashes["md5"] in md5_index:
+        if hashes.md5 in md5_index:
             return ClassifyResult(
                 status="caution", computed_sha1=computed_sha1, matched_title=None, similarity=None,
-                reason=f"md5 match, no sha1 match: {hashes['md5']}",
+                reason=f"md5 match, no sha1 match: {hashes.md5}",
             )
-        if hashes["crc32"] in crc32_index:
+        if hashes.crc32 in crc32_index:
             return ClassifyResult(
                 status="caution", computed_sha1=computed_sha1, matched_title=None, similarity=None,
-                reason=f"crc32 match, no sha1 match: {hashes['crc32']}",
+                reason=f"crc32 match, no sha1 match: {hashes.crc32}",
             )
 
     match = fuzzy_title_match(title, era, _INDEX_PATH, threshold=threshold)
