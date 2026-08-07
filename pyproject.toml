@@ -5,15 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "formatscout"
 version = "0.1.0"
-description = "Multi-tier disk image and directory format/platform/era detector (hash, magic-byte, structural, directory heuristics, extension fallback), plus standalone Xbox xISO/DVD-rip image identification."
+description = "Multi-tier disk image and directory format/platform/era detector (hash, magic-byte, structural, directory heuristics, extension fallback), including Xbox xISO/DVD-rip identification as one of its ISO-tier signals."
 readme = "README.md"
 # smart_media_detector/magic/magic_detect.py reads magic_signatures.toml via the
-# stdlib tomllib module, added in Python 3.11 (not 3.10 as tomllib does not
-# exist there). Every other import across smart_media_detector/ (excluding
-# tests/) and xbox_image.py is either stdlib (hashlib, json, re, struct, sys,
-# zlib, dataclasses, difflib, pathlib, typing, logging, xml.etree.ElementTree,
-# argparse) or a same-package relative import, confirmed by grepping every
-# `^import `/`^from ` line in both. No third-party runtime dependency exists.
+# stdlib tomllib module, added in Python 3.11 (not 3.10, tomllib does not
+# exist there). Every import across smart_media_detector/ (excluding tests/)
+# is either stdlib (hashlib, json, re, struct, sys, zlib, dataclasses,
+# difflib, pathlib, typing, logging, xml.etree.ElementTree, argparse) or a
+# same-package relative import, confirmed by grepping every `^import `/
+# `^from ` line in the package. No third-party runtime dependency exists.
 requires-python = ">=3.11"
 dependencies = []
 
@@ -25,6 +25,10 @@ dependencies = []
 # not in scope to fix during this extraction pass (copy-only, no import
 # repointing) and the test suite will not currently import successfully from
 # this package's own root. Flagged for a follow-up pass, not fixed here.
+# test_iso_detect.py additionally monkeypatches an iso_detect.is_xiso name
+# that no longer exists as of the xbox_image-into-ScanResult rewrite; those
+# specific assertions need updating for the new detect_xbox_image_type-based
+# dispatch and requires_extraction field, on top of the import fix above.
 
 [tool.setuptools]
 packages = [
@@ -34,7 +38,6 @@ packages = [
     "smart_media_detector.utils",
     "smart_media_detector.validators",
 ]
-py-modules = ["xbox_image"]
 
 [tool.setuptools.package-data]
 "smart_media_detector.hashing" = ["hash_index.json"]

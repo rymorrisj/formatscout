@@ -11,9 +11,9 @@ state of that goal, including the places it still falls short).
 
 Given a path, `detect()` returns a `ScanResult` with `title`, `platform`, `era`,
 `confidence` (0.0 to 1.0), a human-readable `reason`, an optional `requires_install`
-flag, and a list of `warnings`. It never raises, even on a garbage or unreadable
-path, it always returns a `ScanResult` with `confidence=0.0` and an explanatory
-reason instead.
+flag, an optional `requires_extraction` flag, and a list of `warnings`. It never
+raises, even on a garbage or unreadable path, it always returns a `ScanResult`
+with `confidence=0.0` and an explanatory reason instead.
 
 ## Detection pipeline
 
@@ -31,7 +31,11 @@ Detection runs in tier order and stops at the first confident match. This matche
 3. **Structural validation**, a deeper, format-specific parse:
    - ISO (`iso_detect.py`): reads the ISO 9660 PVD at sector 16 for volume label,
      publisher, and system-ID fields, then falls back to scanning the root
-     directory for a `.xbe` entry (Original Xbox).
+     directory for a `.xbe` entry (Original Xbox), then to `xbox_image.py`
+     (internal, not a public module, see below) for byte-level Xbox xISO/DVD-rip
+     identification. A raw DVD rip is still reported as `era="xbox"`, with
+     `ScanResult.requires_extraction=True` signaling that extract-xiso needs to
+     run on it before use, a ready-to-use xISO leaves that flag `False`.
    - CHD (`validators/chd_validator.py`): walks the CHD v5 metadata chain, a
      `CHGD` tag means Dreamcast, `CHTR`/`CHT2` means a standard CD/DVD track,
      PS1 vs PS2 is then guessed from the header's logical (uncompressed) size,
@@ -73,7 +77,8 @@ from backend.service.utils.smart_media_detector import detect, ScanResult
 
 scan: ScanResult = detect(Path("/path/to/some.iso"))
 if scan.era is not None:
-    ...  # scan.title, scan.platform, scan.confidence, scan.reason, scan.requires_install
+    ...  # scan.title, scan.platform, scan.confidence, scan.reason
+    ...  # scan.requires_install, scan.requires_extraction
 ```
 
 This is how every real caller in the codebase uses `detect()`, always via a
@@ -326,18 +331,23 @@ rest of Peach 1UP.
   logger does. Purely a visibility difference for these two warning call
   sites, not a correctness one, worth knowing if console output from this
   package ever seems to go quiet after extraction-prep work like this.
-- `iso_detect.py` imports `from ..xbox_image import is_xiso`, a sibling
-  module at `backend/service/utils/xbox_image.py`, one directory above this
-  package. Checked every caller of `xbox_image.py` across the whole backend
-  before deciding whether to move it: `backend/service/backends/xemu.py`,
-  `backend/service/launch/coordinator.py`, and
-  `backend/service/utils/extract_xiso.py` all import from it too, so this
-  package is not its only consumer. It was **not** moved into the package,
-  since moving it would have broken those three call sites for no benefit. It
-  stays a known external dependency: `xbox_image.py` itself has no
-  `backend.*` imports of its own, so it is a clean, small, dependency-free
-  file to vendor as a copy (or keep as a separate shared dependency) at
-  actual extraction time, whichever the extraction plan prefers.
+- `iso_detect.py` previously imported `from ..xbox_image import is_xiso`, a
+  sibling module at `backend/service/utils/xbox_image.py`, one directory
+  above this package, shared with three other backend callers
+  (`backend/service/backends/xemu.py`, `backend/service/launch/coordinator.py`,
+  `backend/service/utils/extract_xiso.py`). At actual extraction time, its
+  detection logic (`detect_xbox_image_type()`) was vendored as an internal
+  module, `xbox_image.py` inside this package, not kept as a separate shared
+  dependency and not re-exposed as a public import. `iso_detect.detect_iso()`
+  now calls it directly and folds the result into `ScanResult`: a `"dvd_rip"`
+  classification sets `requires_extraction=True` on an `era="xbox"` result
+  instead of falling through to the generic size-fallback tier the way it did
+  before this signal existed. This is a one-way fork, not a shared copy:
+  peach_1up's own `backend/service/utils/xbox_image.py` is untouched and
+  keeps its `is_xiso()`/`XboxDvdRipDetected` surface for its three other
+  callers, this package's internal copy dropped both as unused once the
+  signal moved onto `ScanResult` and callers stopped importing the module
+  directly. The two files will drift independently from here.
 - `utils/file_helpers.py` (unused `get_compatible_media()`, three `backend.*`
   imports) and the stub `validators/iso_validator.py`/`validators/rom_validator.py`
   files (`raise NotImplementedError`, never imported anywhere) have since been
@@ -354,12 +364,12 @@ been started beyond the import-hygiene intent described above.
   `tests/`). Confirmed by grep; the two `backend.core.logger` imports in
   `detector.py`/`directory_detect.py` are the only ones that ever existed
   and both are now removed.
-- [ ] Sibling dependency on `backend/service/utils/xbox_image.py`
-  (`iso_detect.py`). Confirmed to have three other callers elsewhere in the
-  backend (`xemu.py`, `coordinator.py`, `extract_xiso.py`), so it was
-  deliberately left in place rather than moved. Extraction still needs a
-  decision: vendor a copy of `xbox_image.py` into the new package, or keep
-  it as a small shared dependency between the two repositories.
+- [x] Sibling dependency on `backend/service/utils/xbox_image.py`
+  (`iso_detect.py`) resolved at extraction time: vendored as an internal
+  module (`xbox_image.py` inside this package), its signal now reaches
+  callers only through `ScanResult.requires_extraction`, not a direct
+  import. peach_1up's own copy is unchanged for its three other callers;
+  this is a one-way fork, see above.
 - [x] Test suite fully colocated under the package's own `tests/` folder,
   nothing left in `backend/tests/` for this package.
 - [ ] No packaging scaffolding yet (`pyproject.toml`, `setup.py`, version
@@ -437,6 +447,12 @@ running only this package's tests in isolation.
   detection) is approximate, it checks whether every root-level executable
   is on the install/setup blocklist. May need tuning based on real-world
   testing.
+- `requires_extraction` is set only by `iso_detect.detect_iso()`'s Xbox
+  DVD-rip check today (size-over-threshold ISO 9660 media past the xISO
+  magic-byte check), there is no equivalent signal for any other era. A
+  caller acting on it (running extract-xiso, or an equivalent conversion
+  step) is responsible for its own tooling, this package only detects the
+  need, it does not perform any conversion itself.
 
 ### Hash Verification: Known Limitations
 

@@ -42,12 +42,23 @@ class MediaTarget:
 
 @dataclass(slots=True)
 class ScanResult:
+    """detect()'s full-pipeline identification result: what a path is,
+    with confidence, plus flags describing what a caller must do before the
+    media is usable.
+
+    requires_extraction: set only by iso_detect.detect_iso() when the file
+        is identified as a raw Xbox DVD rip (valid ISO 9660 magic, but past
+        the xISO size threshold). True means the caller must run extract-xiso
+        on it before launch, mirrors requires_install's "not directly usable
+        yet" role but for a format-conversion step instead of an install step.
+    """
     title: str | None
     platform: str | None
     era: str | None
     confidence: float
     reason: str
     requires_install: bool = False
+    requires_extraction: bool = False
     warnings: list[str] = field(default_factory=list)
 
 

@@ -1,7 +1,7 @@
 import struct
 from pathlib import Path
 
-from ..xbox_image import is_xiso
+from .xbox_image import detect_xbox_image_type
 from .magic.magic_detect import detect_from_magic
 from .result import ScanResult
 from .validators import bin_validator
@@ -22,10 +22,17 @@ def detect_iso(path: Path) -> ScanResult:
     if pvd.era is not None:
         return pvd
 
-    if is_xiso(path):
+    xbox_kind = detect_xbox_image_type(path)
+    if xbox_kind == "xiso":
         return ScanResult(
             title=None, platform=None, era="xbox", confidence=0.9,
-            reason="XDVDFS magic 'MICROSOFT*XBOX*MEDIA' found at 0x10000 — Original Xbox disc image",
+            reason="XDVDFS magic 'MICROSOFT*XBOX*MEDIA' found at 0x10000, Original Xbox disc image",
+        )
+    if xbox_kind == "dvd_rip":
+        return ScanResult(
+            title=None, platform=None, era="xbox", confidence=0.9,
+            reason="ISO 9660 magic found but file exceeds the xISO size threshold, raw Xbox DVD rip",
+            requires_extraction=True,
         )
 
     return _iso_size_fallback(path)
