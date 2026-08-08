@@ -103,9 +103,12 @@ flowchart TD
    for ambiguous `.img` and `.iso` files.
 
 PE executables (`.exe` files and files pointed to by `AUTORUN.INF`) are handled
-by `exe_detect.py` and `directory_detect.py` respectively, both read the PE
-header's `MajorOperatingSystemVersion` and (for autorun) `Subsystem` fields to
-distinguish Windows 98 era from Windows XP era.
+by `exe_detect.py` and `directory_detect.py` respectively. Both read the PE
+header's `Subsystem` field as a gate (only GUI and console executables are
+classified at all) and then its `MajorOperatingSystemVersion` field to
+distinguish Windows 98 era from Windows XP era. The two implementations are
+independent, duplicated code paths rather than one delegating to the other,
+`test_directory_detect.py` pins that they still agree.
 
 `_compute_requires_install()` in `detector.py` is a separate heuristic, applied
 after era detection, that flags DOS-era installer media (raw `.iso`/`.cue`,
@@ -178,9 +181,11 @@ Both formats are parsed by the same code path, `hashing/dat_parser.py` reads
 `<header><name>` for a platform hint and iterates every `<game>/<rom>` element,
 so a single parser handles DATs from either source, or from TOSEC, which uses a
 compatible schema. `_ERA_MARKERS` in `dat_parser.py` maps the platform-name
-string to an era slug: `playstation 2` to `ps2`, `playstation` to `ps1`,
-`xbox` to `xbox`, and `dreamcast` to `dreamcast` are confirmed against real
-Redump DAT header text. `super nintendo entertainment system` to `snes`,
+string to an era slug: `playstation 3` to `ps3`, `playstation 2` to `ps2`,
+`playstation` to `ps1`, `xbox 360` to `xbox360`, `xbox` to `xbox`, and
+`dreamcast` to `dreamcast` are confirmed against real Redump DAT header text.
+The list is ordered most-specific-first so the bare `playstation` and `xbox`
+substrings cannot shadow the numbered platforms ahead of them. `super nintendo entertainment system` to `snes`,
 `nintendo entertainment system` to `nes`, and `nintendo 64` to `n64` follow
 No-Intro's standard naming convention but have not been verified against an
 actual downloaded No-Intro DAT. There is deliberately no mapping for
@@ -251,22 +256,29 @@ a hash match.
 
 ## Known limitations
 
-- Xbox OG ISOs without `DEFAULT.XBE` at the ISO root will not resolve via the
-  structural `.xbe` scan, the magic-byte tier still applies as a fallback.
-  Standard Xbox rips typically include `DEFAULT.XBE` at the root, so this is
-  expected to be rare in practice.
+- Xbox OG ISOs with no `.xbe` entry in the ISO 9660 root directory will not
+  resolve via the structural `.xbe` scan. The `xbox_image.py` byte-offset
+  check (XDVDFS magic, then the ISO 9660 magic plus size threshold) still
+  applies as a fallback, note that the magic-byte tier does not, since no
+  signature in `magic_signatures.toml` targets `.iso` today. Standard Xbox
+  rips typically include `DEFAULT.XBE` at the root, so this is expected to
+  be rare in practice.
 - `.bin`/`.cue` pairs without a matching `.cue` sibling return low confidence
   and a warning, the scanner cannot resolve CD layout without a cue sheet.
 - Every entry point (`detect()`, `verify()`, `classify()`, `hash_file()`) takes
   a local, seekable `Path` and calls `.open("rb")`/`.stat()`/`.iterdir()`
   directly. There is no `BinaryIO`/stream-based entry point anywhere in the
-  package. "Storage-agnostic" in this package's own description (see the top
-  of this file) means disk-agnostic within a local filesystem, for example it
-  does not care whether that filesystem is a network share or a local disk,
-  not stream-agnostic in the broader sense of accepting an in-memory buffer or
-  a remote object-storage handle without a local path at all. Worth resolving
-  if this package's intended audience grows to include non-local-filesystem
-  callers.
+  package. The storage model is therefore disk-agnostic only within a local
+  filesystem, for example it does not care whether that filesystem is a
+  network share or a local disk, and not stream-agnostic in the broader sense
+  of accepting an in-memory buffer or a remote object-storage handle without a
+  local path at all. Worth resolving if this package's intended audience grows
+  to include non-local-filesystem callers.
+- Only `detect()` is exception-safe. It wraps its whole pipeline in a
+  try/except and returns a `confidence=0.0` `ScanResult` on any unexpected
+  error. `classify()` catches `OSError` and reports `status="unchecked"`, but
+  `verify()` and `hash_file()` let read errors propagate to the caller, so a
+  missing or unreadable path raises rather than returning a result object.
 - The `requires_install` heuristic (DOS/Windows installer-only directory
   detection) is approximate, it checks whether every root-level executable
   is on the install/setup blocklist. May need tuning based on real-world
@@ -312,23 +324,38 @@ anything outside this package.
 
 ## Current test coverage
 
-All tests live under this package's own `tests/` folder. One `test_*.py`
-file per source module:
+All tests live under this package's own `tests/` folder, twelve `test_*.py`
+modules:
 
 - `test_classify.py` tests `classify.py`
+- `test_verify.py` tests `verify.py`
+- `test_iso_detect.py` tests `iso_detect.py`, including `detect_iso()`'s
+  dispatch onto `xbox_image.detect_xbox_image_type()` and the
+  `requires_extraction=True` DVD-rip branch
+- `test_exe_detect.py` tests `exe_detect.py`
+- `test_directory_detect.py` tests `directory_detect.py`
 - `test_magic_detect.py` tests `magic/magic_detect.py`, including the
   malformed-TOML-at-import-time case below
 - `test_chd_validator.py` tests `validators/chd_validator.py`
 - `test_bin_validator.py` tests `validators/bin_validator.py`
 - `test_hash_lookup.py` tests `hashing/hash_lookup.py`
-- `test_exe_detect.py` tests `exe_detect.py`
-- `test_verify.py` tests `verify.py`
-- `test_iso_detect.py` tests `iso_detect.py`
-- `test_directory_detect.py` tests `directory_detect.py`
+- `test_dat_parser.py` tests `hashing/dat_parser.py`
+- `test_build_index.py` smoke-tests `hashing/build_index.py`'s CLI `main()`
+- `test_blocklist.py` tests `utils/blocklist.py`
 
 `tests/smart_media_fixtures.py` holds shared synthetic fixtures (fake
-hash-index entries, minimal CHD/ISO/PE/CD-sector byte builders) used across
-several of the files above, it is not itself collected as a test module.
+hash-index entries, minimal CHD/ISO/PE/CD-sector/DAT-XML builders) used across
+every one of the files above except `test_blocklist.py`. It is not itself
+collected as a test module.
+
+Three source modules have no dedicated test file of their own:
+`detector.py` (the public `detect()` entry point, its suffix dispatch table,
+and `_compute_requires_install()`), `hashing/title_match.py` (reached only
+indirectly through `test_classify.py`), and `xbox_image.py` (reached only
+indirectly through `test_iso_detect.py`). Within `test_directory_detect.py`,
+coverage is limited to `_detect_from_pe()` and `_parse_autorun_exe()`,
+`detect_directory()` and the `_detect_from_directory()` marker-file
+heuristics are not exercised. These are the known coverage gaps.
 
 The one previously-deferred gap, magic_detect.py parsing
 `magic_signatures.toml` at module-import time rather than inside a function,

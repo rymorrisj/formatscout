@@ -1,9 +1,10 @@
 """Tests for formatscout.exe_detect.
 
-Covers the Bug 3 fix from the prior session: a Subsystem gate must be applied
-before the era branches run, and every DOS-fallback branch must report the
-same 0.65 confidence regardless of which condition (too-short header vs. no
-PE signature) produced it.
+Two behaviors are pinned deliberately: a Subsystem gate must be applied before
+the era branches run (a PE whose Subsystem is outside GUI/CUI is rejected
+outright rather than era-guessed), and every DOS-fallback branch must report
+the same 0.65 confidence regardless of which condition (too-short header vs.
+no PE signature) produced it.
 """
 
 from pathlib import Path
@@ -80,9 +81,9 @@ class TestGarbagePeOffset:
 
 class TestSubsystemGate:
     def test_subsystem_not_in_gui_or_cui_returns_zero_confidence(self, tmp_path: Path):
-        """Subsystem gate (Bug 3 fix): a PE with a valid signature and a
-        plausible OS version but a Subsystem outside (2, 3), i.e. not GUI or
-        CUI, must be rejected outright, not fall through to an era guess.
+        """Subsystem gate: a PE with a valid signature and a plausible OS
+        version but a Subsystem outside (2, 3), i.e. not GUI or CUI, must be
+        rejected outright, not fall through to an era guess.
         """
         path = tmp_path / "native_driver.exe"
         path.write_bytes(fx.build_pe_header(major_os_version=5, subsystem=1))  # 1 = IMAGE_SUBSYSTEM_NATIVE

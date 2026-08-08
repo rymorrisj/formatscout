@@ -54,7 +54,7 @@ class TestExtractEmbeddedSha1:
 
 
 # ---------------------------------------------------------------------------
-# detect(), magic check
+# detect_chd_platform(), magic check
 # ---------------------------------------------------------------------------
 
 class TestDetectMagicCheck:
@@ -81,7 +81,7 @@ class TestDetectMagicCheck:
 
 
 # ---------------------------------------------------------------------------
-# detect(), metadata tag dispatch
+# detect_chd_platform(), metadata tag dispatch
 # ---------------------------------------------------------------------------
 
 class TestDetectMetadataTagDispatch:
@@ -136,7 +136,7 @@ class TestDetectMetadataTagDispatch:
 
 
 # ---------------------------------------------------------------------------
-# detect(), metadata chain cycle/bounds protection
+# detect_chd_platform(), metadata chain cycle/bounds protection
 # ---------------------------------------------------------------------------
 
 class TestDetectMetadataChainProtection:

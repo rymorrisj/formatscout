@@ -15,9 +15,9 @@ logger = logging.getLogger(__name__)
 # "PlayStation 5", "PlayStation Portable", "PlayStation Vita", "Xbox One",
 # "Xbox Series") and has no more-specific marker of its own ahead of it in
 # this list will silently fall into ps1/xbox the same way PS3 and Xbox 360
-# did before this fix. None of those platforms are in the vocabulary yet
-# (see config/constants.yaml eras), so do not add a marker for one without
-# also adding its era value to the vocabulary chain first.
+# did before this fix. None of those platforms are in this package's era
+# vocabulary yet (the era slugs produced below are the whole of it), so do
+# not add a marker for one without deciding on its era value first.
 #
 # These entries are confirmed against real Redump DAT header text ingested
 # into hash_index.json ("Sony - PlayStation", "Sony - PlayStation 2",

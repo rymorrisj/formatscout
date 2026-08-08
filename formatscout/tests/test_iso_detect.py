@@ -333,13 +333,26 @@ class TestDetectFromPvd:
 
 # ---------------------------------------------------------------------------
 # detect_iso, dispatch order: detect_from_magic -> detect_from_pvd ->
-# is_xiso -> size fallback.
+# xbox_image.detect_xbox_image_type -> size fallback.
+#
+# detect_xbox_image_type(path) takes a single path argument and returns one
+# of exactly four strings: "xiso", "dvd_rip", "iso9660", "unknown". detect_iso()
+# branches on only the first two ("xiso" -> era=xbox 0.9; "dvd_rip" -> era=xbox
+# 0.9 plus requires_extraction=True). "iso9660" and "unknown" are both
+# unhandled by detect_iso() and fall through to _iso_size_fallback(), so the
+# size-fallback tests below are parametrized over both rather than assuming
+# only one of them reaches that tier.
 #
 # NOTE: magic_signatures.toml has zero signatures with "iso" in applies_to
 # today, so detect_from_magic(path, "iso") can never return a non-None era
 # for a real .iso file. That branch is exercised here via monkeypatch
 # (dependency injection on the wiring), not a real magic-byte fixture.
 # ---------------------------------------------------------------------------
+
+# The two detect_xbox_image_type() return values detect_iso() does not
+# special-case, both of which must reach _iso_size_fallback().
+NON_XBOX_IMAGE_TYPES = ("iso9660", "unknown")
+
 
 class TestDetectIso:
     def test_magic_match_short_circuits_before_pvd(self, tmp_path: Path, monkeypatch):
@@ -367,11 +380,15 @@ class TestDetectIso:
         result = iso_detect.detect_iso(iso_path)
         assert result.era == "winxp"
 
-    def test_falls_through_to_is_xiso_when_no_pvd_signal(self, tmp_path: Path, monkeypatch):
+    def test_falls_through_to_xbox_image_type_when_no_pvd_signal(self, tmp_path: Path, monkeypatch):
+        """detect_xbox_image_type() == "xiso": a ready-to-use Original Xbox
+        disc image. requires_extraction must stay False, only the dvd_rip
+        branch below sets it.
+        """
         from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
-        monkeypatch.setattr(iso_detect, "is_xiso", lambda path: True)
+        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: "xiso")
         iso_path = tmp_path / "game.iso"
         iso_path.write_bytes(b"\x00" * 100)  # no valid PVD
 
@@ -379,12 +396,58 @@ class TestDetectIso:
         assert result.era == "xbox"
         assert result.confidence == 0.9
         assert "XDVDFS" in result.reason
+        assert result.requires_extraction is False
 
-    def test_falls_through_to_size_fallback_over_4gb(self, tmp_path: Path, monkeypatch):
+    def test_dvd_rip_sets_requires_extraction(self, tmp_path: Path, monkeypatch):
+        """detect_xbox_image_type() == "dvd_rip": ISO 9660 magic present but
+        the file is past the xISO size threshold, a raw Xbox DVD rip. Same
+        era/confidence as the xiso branch, distinguished only by
+        requires_extraction=True, the signal that extract-xiso must run
+        before the image is usable.
+        """
         from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
-        monkeypatch.setattr(iso_detect, "is_xiso", lambda path: False)
+        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: "dvd_rip")
+        iso_path = tmp_path / "game.iso"
+        iso_path.write_bytes(b"\x00" * 100)  # no valid PVD
+
+        result = iso_detect.detect_iso(iso_path)
+        assert result.era == "xbox"
+        assert result.confidence == 0.9
+        assert result.requires_extraction is True
+        assert "raw Xbox DVD rip" in result.reason
+
+    def test_real_dvd_rip_image_resolves_end_to_end(self, tmp_path: Path):
+        """The same dvd_rip outcome with nothing mocked at all, the only test
+        that exercises the real iso_detect -> xbox_image wiring rather than a
+        monkeypatched stand-in for it.
+
+        Layout: "CD001" at 0x8001 (the ISO 9660 standard identifier, which
+        also leaves byte 0x8000 zero so detect_from_pvd() sees no valid PVD
+        type code and falls through), nothing at 0x10000 so the XDVDFS magic
+        check misses, and a sparse-truncated size past xbox_image's
+        4,000,000,000-byte dvd_rip threshold.
+        """
+        from formatscout import iso_detect
+
+        iso_path = tmp_path / "game.iso"
+        with iso_path.open("wb") as fh:
+            fh.seek(0x8001)
+            fh.write(b"CD001")
+            fh.truncate(4_100_000_000)
+
+        result = iso_detect.detect_iso(iso_path)
+        assert result.era == "xbox"
+        assert result.confidence == 0.9
+        assert result.requires_extraction is True
+
+    @pytest.mark.parametrize("image_type", NON_XBOX_IMAGE_TYPES)
+    def test_falls_through_to_size_fallback_over_4gb(self, tmp_path: Path, monkeypatch, image_type: str):
+        from formatscout import iso_detect
+
+        monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
+        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: image_type)
         iso_path = tmp_path / "game.iso"
         iso_path.touch()
         os.truncate(iso_path, 5_000_000_000)
@@ -392,13 +455,15 @@ class TestDetectIso:
         result = iso_detect.detect_iso(iso_path)
         assert result.era is None
         assert result.confidence == 0.2
+        assert result.requires_extraction is False
         assert result.warnings
 
-    def test_falls_through_to_size_fallback_under_800mb(self, tmp_path: Path, monkeypatch):
+    @pytest.mark.parametrize("image_type", NON_XBOX_IMAGE_TYPES)
+    def test_falls_through_to_size_fallback_under_800mb(self, tmp_path: Path, monkeypatch, image_type: str):
         from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
-        monkeypatch.setattr(iso_detect, "is_xiso", lambda path: False)
+        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: image_type)
         iso_path = tmp_path / "game.iso"
         iso_path.touch()
         os.truncate(iso_path, 500 * 1024 * 1024)
@@ -406,13 +471,15 @@ class TestDetectIso:
         result = iso_detect.detect_iso(iso_path)
         assert result.era is None
         assert result.confidence == 0.2
+        assert result.requires_extraction is False
         assert result.warnings
 
-    def test_no_signal_found_in_normal_size_range(self, tmp_path: Path, monkeypatch):
+    @pytest.mark.parametrize("image_type", NON_XBOX_IMAGE_TYPES)
+    def test_no_signal_found_in_normal_size_range(self, tmp_path: Path, monkeypatch, image_type: str):
         from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
-        monkeypatch.setattr(iso_detect, "is_xiso", lambda path: False)
+        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: image_type)
         iso_path = tmp_path / "game.iso"
         iso_path.touch()
         os.truncate(iso_path, 1_000_000_000)
@@ -420,6 +487,7 @@ class TestDetectIso:
         result = iso_detect.detect_iso(iso_path)
         assert result.era is None
         assert result.confidence == 0.0
+        assert result.requires_extraction is False
 
 
 # ---------------------------------------------------------------------------
@@ -517,13 +585,13 @@ class TestDetectCue:
 
 
 # ---------------------------------------------------------------------------
-# detect_chd, thin delegation to validators.chd_validator.detect(). Full
-# CHD parsing logic already covered by test_chd_validator.py; this only
+# detect_chd, thin delegation to validators.chd_validator.detect_chd_platform().
+# Full CHD parsing logic already covered by test_chd_validator.py; this only
 # confirms the wiring.
 # ---------------------------------------------------------------------------
 
 class TestDetectChd:
-    def test_delegates_to_chd_validator_detect(self, tmp_path: Path, monkeypatch):
+    def test_delegates_to_chd_validator_detect_chd_platform(self, tmp_path: Path, monkeypatch):
         from formatscout import iso_detect
         from formatscout.result import ScanResult
         from formatscout.validators import chd_validator

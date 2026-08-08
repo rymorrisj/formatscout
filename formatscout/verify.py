@@ -10,9 +10,13 @@ def verify(path: Path, expected_sha1: str) -> VerifyResult:
     """Re-check a single file against a known-good sha1, hash lookup only.
 
     Unlike detect(), this never runs the magic-byte/structural/directory/
-    fallback tiers. It mirrors bios_placement.py's direct use of
-    hash_file() for a placed-file check, just against the bundled hash
-    index instead of one hardcoded hash.
+    fallback tiers, it is a direct hash_file() check against the bundled
+    hash index. See VerifyResult for what each status means, and classify()
+    for the from-scratch equivalent that needs no prior expected_sha1.
+
+    Note that this does not swallow read errors the way classify() does:
+    an unreadable or missing path propagates the OSError from hash_file()
+    to the caller rather than returning a result object.
     """
     computed_sha1 = _hash_lookup.hash_file(path).sha1
 

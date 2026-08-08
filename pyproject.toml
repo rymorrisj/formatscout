@@ -17,19 +17,16 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
-# tests/ under formatscout/ still imports itself via the absolute
-# monorepo path (`from backend.service.utils.smart_media_detector.tests import
-# smart_media_fixtures`, 11 files, plus one `import
-# backend.service.utils.smart_media_detector.magic.magic_detect` in
-# test_magic_detect.py) left over from its origin inside peach_1up. This was
-# not in scope to fix during this extraction pass (copy-only, no import
-# repointing), nor during the later smart_media_detector-to-formatscout
-# structural move, and the test suite will not currently import successfully
-# from this package's own root. Flagged for a follow-up pass, not fixed here.
-# test_iso_detect.py additionally monkeypatches an iso_detect.is_xiso name
-# that no longer exists as of the xbox_image-into-ScanResult rewrite; those
-# specific assertions need updating for the new detect_xbox_image_type-based
-# dispatch and requires_extraction field, on top of the import fix above.
+# tests/ imports the package by its own name throughout (`from
+# formatscout.tests import smart_media_fixtures as fx`, plus per-test local
+# imports of the modules under test). No pre-extraction monorepo import paths
+# remain anywhere under the package. pytest is the only test-time dependency
+# and is deliberately not declared here, there is no optional-dependency
+# group yet.
+#
+# formatscout.tests is intentionally absent from the packages list below:
+# the suite ships in the repository but is not installed with the
+# distribution. Run it from a source checkout (`pytest formatscout/tests/`).
 
 [tool.setuptools]
 packages = [

@@ -34,7 +34,7 @@ class TestDetectFromPe:
         assert result.era == "winxp"
 
     def test_subsystem_gate_rejects_non_gui_console_subsystems(self, tmp_path: Path):
-        """Subsystem values other than 2 (GUI) or 3 (console) are gated out —
+        """Subsystem values other than 2 (GUI) or 3 (console) are gated out,
         confirms the Subsystem gate is still present and unmodified."""
         exe_path = tmp_path / "SETUP.EXE"
         exe_path.write_bytes(fx.build_pe_header(major_os_version=5, subsystem=1))

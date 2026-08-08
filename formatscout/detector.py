@@ -15,8 +15,8 @@ log = logging.getLogger(__name__)
 
 
 # ── requires_install heuristic ───────────────────────────────────────────────
-# Heuristic, may need tuning post-beta. Covers the three cases the old
-# detect_media_type-based logic handled plus installer-only DOS directories.
+# Heuristic, may need tuning post-beta. Covers DOS-era raw .iso/.cue media,
+# small .img floppy images, and installer-only DOS directories.
 
 def _compute_requires_install(path: Path, era: str | None) -> bool:
     if era != "dos":
@@ -119,7 +119,7 @@ def _detect_file(path: Path, dir_cache: dict[Path, list[Path]] | None = None) ->
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
             reason="NDS format is not supported",
-            warnings=["NDS format is not supported by Peach 1UP"],
+            warnings=["NDS format is not supported by formatscout"],
         )
 
     if suffix == ".xiso":

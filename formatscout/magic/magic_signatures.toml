@@ -1,4 +1,4 @@
-# Peach 1UP, Magic Number Signature Table
+# formatscout, Magic Number Signature Table
 # Each entry identifies a platform from binary signatures at known offsets.
 # Fields:
 #   era       , era slug matched against known eras in the system
@@ -8,7 +8,9 @@
 #   applies_to, list of file extensions this signature applies to (without dot)
 #   note      , optional, for community contributors
 #
-# To add a new signature: append a [[signatures]] block and restart the backend.
+# To add a new signature: append a [[signatures]] block. This file is parsed
+# once at magic_detect import time, so a running process must be restarted to
+# pick up an edit.
 # Magic bytes must match exactly at the given offset, no wildcards.
 # Community contributions welcome via pull request.
 

@@ -100,7 +100,7 @@ class TestDetectFromMagicPerSignature:
 
 
 # ---------------------------------------------------------------------------
-# resolve_ps_generation_from_file(), SYSTEM.CNF already extracted to disk
+# _resolve_ps_generation_from_file(), SYSTEM.CNF already extracted to disk
 # ---------------------------------------------------------------------------
 
 class TestResolvePsGenerationFromFile:

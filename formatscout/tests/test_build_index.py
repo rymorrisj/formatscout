@@ -6,13 +6,13 @@ parameters, these tests monkeypatch sys.argv to drive it the same way a real
 invocation would. Basic smoke coverage only, per the scoping for this file,
 not exhaustive CLI-argument-parsing coverage.
 
-One real, worth-knowing side effect found while writing this: build_index.py
-calls logging.basicConfig(...) at module import time (not inside main()), so
-merely importing this module is enough to attach a StreamHandler to the root
-logger, a no-op if root already has one, but otherwise a process-global change
-that would outlive this test file if left in place. Each test below saves and
-restores logging.root.handlers around the call so this file doesn't leak that
-state into whatever other test happens to run later in the same pytest process.
+One real, worth-knowing side effect: main() calls logging.basicConfig(...) as
+its very first statement, so every invocation attaches a StreamHandler to the
+root logger, a no-op if root already has one, but otherwise a process-global
+change that would outlive this test file if left in place. Each test below
+saves and restores logging.root.handlers around the call so this file doesn't
+leak that state into whatever other test happens to run later in the same
+pytest process.
 """
 
 import json

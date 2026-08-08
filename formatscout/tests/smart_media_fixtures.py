@@ -1,9 +1,11 @@
 """Shared synthetic fixtures for formatscout tests.
 
 Not a test module itself (no test_ prefix, nothing here is collected by pytest).
-Plain helper functions/constants, imported directly by test_classify.py and
-test_magic_detect.py, following this package's existing convention (see
-test_iso_detect.py) of local per-test-file imports over a shared conftest.py.
+Plain helper functions/constants, imported directly (`from formatscout.tests
+import smart_media_fixtures as fx`) by every test module in this folder except
+test_blocklist.py, which needs no synthetic byte fixtures. This follows the
+package's existing convention of a plain importable helper module plus local
+per-test-file imports of the code under test, rather than a shared conftest.py.
 
 hash_index.json in production is ~88MB, real DAT-derived data, never to be
 loaded directly in a test. Every hash-index-shaped fixture here is a small,
@@ -194,7 +196,8 @@ def build_synthetic_chd(embedded_sha1_hex: str) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Part 1.1b, CHD header and metadata-chain builder, for chd_validator.detect()
+# Part 1.1b, CHD header and metadata-chain builder, for
+# chd_validator.detect_chd_platform()
 # ---------------------------------------------------------------------------
 #
 # CHD v5 fixed-header field offsets (chd.h, mirrored from chd_validator.py):
@@ -205,8 +208,9 @@ def build_synthetic_chd(embedded_sha1_hex: str) -> bytes:
 #
 # A metadata entry is a 16-byte header at its own offset in the file:
 #   tag(4) + flags(1)+length(3) packed as one big-endian uint32 + next_offset(8, big-endian uint64)
-# chd_validator.detect() only reads the tag and next_offset fields, flags/length
-# content is never inspected, so build_chd_metadata_entry() leaves them zeroed.
+# chd_validator.detect_chd_platform() only reads the tag and next_offset fields,
+# flags/length content is never inspected, so build_chd_metadata_entry() leaves
+# them zeroed.
 
 CHD_HEADER_SIZE = 124  # real CHD v5 header size; only matters as a safe minimum buffer length
 CHD_META_ENTRY_LEN = 16
@@ -256,7 +260,7 @@ def place_chd_metadata_entry(buf: bytearray, offset: int, tag: bytes, next_offse
 
 # ---------------------------------------------------------------------------
 # Part 1.2, synthetic 2352-byte Mode-2 CD sector builder, for
-# magic_detect._resolve_ps_generation() / resolve_ps_generation_from_file()
+# magic_detect._resolve_ps_generation() / _resolve_ps_generation_from_file()
 # ---------------------------------------------------------------------------
 
 SECTOR = 2352
