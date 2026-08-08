@@ -1,7 +1,7 @@
 import struct
 from pathlib import Path
 
-from .iso_detect import _POINTER_FILE_READ_CAP_BYTES
+from .constants import POINTER_FILE_READ_CAP_BYTES
 from .result import ScanResult
 
 _WINDOWS_MARKERS = frozenset({"WINDOWS", "WIN", "SYSTEM", "SYSTEM32", "PROGRAM FILES", "PROGRA~1"})
@@ -43,7 +43,7 @@ def _detect_from_autorun(root: Path) -> ScanResult:
 def _parse_autorun_exe(autorun: Path) -> str | None:
     try:
         with autorun.open("rb") as fh:
-            raw = fh.read(_POINTER_FILE_READ_CAP_BYTES)
+            raw = fh.read(POINTER_FILE_READ_CAP_BYTES)
         for line in raw.decode("utf-8", errors="replace").splitlines():
             stripped = line.strip()
             if stripped.upper().startswith(("OPEN=", "RUN=")):

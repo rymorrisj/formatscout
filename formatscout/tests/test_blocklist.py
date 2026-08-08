@@ -68,6 +68,60 @@ class TestScoreExecutablePassThrough:
 
 
 # ---------------------------------------------------------------------------
+# Regression: short-prefix false positives.
+#
+# The list previously carried the bare prefixes "ins" and "set", which blocked
+# real game and utility executables outright. Because detector.py's
+# _compute_requires_install() only reports a directory as installer-only when
+# *every* root-level executable is blocked, one false positive on the real
+# game binary was enough to mislabel the whole directory. These names must
+# score 1.0, and the genuine installer names the list exists for must still
+# score 0.0.
+# ---------------------------------------------------------------------------
+
+class TestShortPrefixFalsePositives:
+    @pytest.mark.parametrize(
+        "stem",
+        [
+            "insanity",    # was caught by the "ins" prefix
+            "instinct",    # was caught by "ins"/"inst"
+            "inspector",   # was caught by "ins"
+            "settings",    # was caught by the "set" prefix
+            "setter",      # was caught by "set"
+            "unreal",      # near-miss on the uninst/unstall/unwise family
+            "game_set",    # was caught by the "_set" suffix, likelier a settings editor
+        ],
+    )
+    def test_real_executable_names_are_not_blocked(self, stem: str):
+        assert score_executable(stem) == 1.0
+        assert is_blocked(stem) is False
+
+    @pytest.mark.parametrize(
+        "stem",
+        [
+            "install", "installer", "instal", "installshield", "install32",
+            "setup", "setup1", "setupex", "isetup",
+            "uninst", "uninstall", "uninst000", "unstall", "unwise",
+            "arcinst",
+            "inst", "set", "arc",
+            "deice", "pkunzip", "pkzip", "lzma", "expand", "mscdex",
+            "smartdrv", "readme", "arj", "pkware", "lha", "zoo",
+            "game_inst", "game_setup",
+        ],
+    )
+    def test_genuine_installer_and_tool_names_are_still_blocked(self, stem: str):
+        assert score_executable(stem) == 0.0
+        assert is_blocked(stem) is True
+
+    @pytest.mark.parametrize(
+        "stem",
+        ["INSTALL", "SetUp", "UnInstall", "PKUNZIP", "Game_Setup"],
+    )
+    def test_still_blocked_case_insensitively(self, stem: str):
+        assert is_blocked(stem) is True
+
+
+# ---------------------------------------------------------------------------
 # is_blocked(), thin wrapper, score_executable(stem) == 0.0
 # ---------------------------------------------------------------------------
 

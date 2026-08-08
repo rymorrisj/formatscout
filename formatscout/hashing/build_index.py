@@ -6,7 +6,9 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 from .dat_parser import parse_dat
@@ -21,6 +23,33 @@ def _load_existing(output_path: Path) -> dict:
         return {}
     with output_path.open("r", encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def _write_index_atomically(index: dict, output_path: Path) -> None:
+    """Serialise *index* to a sibling temp file, then os.replace() it into place.
+
+    Writing directly to output_path meant a crash, a full disk, or an
+    interrupted run left the bundled hash_index.json truncated and no longer
+    valid JSON, which every consumer (hash_lookup._load_cached) then fails to
+    load. os.replace() is atomic within a filesystem, so the index is either
+    the previous complete version or the new complete version, never a partial
+    one. The temp file is created in the destination directory so the rename
+    cannot cross a filesystem boundary.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=output_path.parent, prefix=f".{output_path.name}.", suffix=".tmp",
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(index, fh, indent=2, ensure_ascii=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, output_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def main() -> None:
@@ -104,9 +133,7 @@ def main() -> None:
                 dat_path.name, file_skipped,
             )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as fh:
-        json.dump(index, fh, indent=2, ensure_ascii=False)
+    _write_index_atomically(index, output_path)
 
     print(f"Files parsed:    {files_parsed}")
     print(f"Entries added:   {entries_added}")

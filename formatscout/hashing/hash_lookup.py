@@ -32,6 +32,22 @@ def hash_file(path: Path) -> HashFileResult:
 
 
 def lookup(path: Path, index_path: Path) -> ScanResult | None:
+    """Tier-1 identification: match a file's hashes against the bundled index.
+
+    Three descending tiers, each with its own confidence:
+
+      sha1  (1.0)  cryptographic digest, treat a hit as identification.
+      md5   (0.85) broken against deliberate collisions, but a chance
+                   collision on real dump data is not a practical concern.
+      crc32 (0.75) NOT a cryptographic digest. CRC32 is a 32-bit error-
+                   detection checksum: collisions exist by the pigeonhole
+                   principle at ~2**32 inputs and can be constructed
+                   trivially and on purpose. A crc32 hit is a hint that the
+                   file is probably the indexed title, never proof of it, and
+                   0.75 must not be read as strong identification. Do not use
+                   this tier to authenticate a file or to make a decision that
+                   is unsafe if the identification is wrong.
+    """
     index, md5_index, crc32_index = _load_cached(index_path)
     if not index:
         return None
@@ -77,6 +93,8 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
             reason=f"md5 match: {hashes.md5}",
         )
 
+    # Weakest tier, see the confidence table in this function's docstring:
+    # crc32 is a non-cryptographic checksum and a hit is a hint, not proof.
     entry = crc32_index.get(hashes.crc32)
     if entry is not None:
         return ScanResult(

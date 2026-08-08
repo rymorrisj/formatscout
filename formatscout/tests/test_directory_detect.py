@@ -73,8 +73,9 @@ class TestDetectFromPe:
 
 # ---------------------------------------------------------------------------
 # _parse_autorun_exe(), read cap fix from the perf pass (commit 98ce932):
-# _POINTER_FILE_READ_CAP_BYTES (imported from iso_detect.py) must actually
-# cap the read, not just exist as an unused constant.
+# POINTER_FILE_READ_CAP_BYTES (now in formatscout.constants, previously
+# imported from iso_detect.py) must actually cap the read, not just exist as
+# an unused constant.
 # ---------------------------------------------------------------------------
 
 class TestParseAutorunExe:
@@ -106,16 +107,14 @@ class TestParseAutorunExe:
         assert self._call(tmp_path / "ghost.inf") is None
 
     def test_directive_beyond_read_cap_is_never_seen(self, tmp_path: Path):
-        """Regression for the perf-pass read cap: _POINTER_FILE_READ_CAP_BYTES
+        """Regression for the perf-pass read cap: POINTER_FILE_READ_CAP_BYTES
         must actually cap the read at that many bytes. A real OPEN= directive
         placed after that boundary must not be found, proof the file is
         genuinely truncated/capped on read, not fully read regardless of size.
         """
-        from formatscout.directory_detect import (
-            _POINTER_FILE_READ_CAP_BYTES,
-        )
+        from formatscout.constants import POINTER_FILE_READ_CAP_BYTES
 
-        padding = b";" + b"x" * (_POINTER_FILE_READ_CAP_BYTES + 100) + b"\n"
+        padding = b";" + b"x" * (POINTER_FILE_READ_CAP_BYTES + 100) + b"\n"
         content = padding + b"OPEN=SETUP.EXE\n"
         autorun = tmp_path / "AUTORUN.INF"
         autorun.write_bytes(content)
@@ -127,12 +126,10 @@ class TestParseAutorunExe:
         inside the cap, on an otherwise large file, is still found, the cap
         truncates the read, it doesn't break normal parsing.
         """
-        from formatscout.directory_detect import (
-            _POINTER_FILE_READ_CAP_BYTES,
-        )
+        from formatscout.constants import POINTER_FILE_READ_CAP_BYTES
 
         padding = b";" + b"x" * 1000 + b"\n"
-        trailer = b";" * _POINTER_FILE_READ_CAP_BYTES
+        trailer = b";" * POINTER_FILE_READ_CAP_BYTES
         content = padding + b"OPEN=SETUP.EXE\n" + trailer
         autorun = tmp_path / "AUTORUN.INF"
         autorun.write_bytes(content)

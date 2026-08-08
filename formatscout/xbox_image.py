@@ -7,23 +7,27 @@ result objects, never by importing this module directly.
 
 from pathlib import Path
 
+from .constants import DVD_SIZE_THRESHOLD_BYTES
+
 _XBOX_MAGIC = b"MICROSOFT*XBOX*MEDIA"
 _XBOX_MAGIC_OFFSET = 0x10000
 _ISO9660_MAGIC = b"CD001"
 _ISO9660_OFFSET = 0x8001
-_DVD_RIP_SIZE_THRESHOLD = 4_000_000_000
 
 
-def detect_xbox_image_type(path: str | Path) -> str:
+def detect_xbox_image_type(path: Path) -> str:
     """
     Returns one of: "xiso", "dvd_rip", "iso9660", "unknown"
 
     Reads only the minimum bytes needed at two fixed offsets. Never raises on
     IO, returns "unknown" on any error.
+
+    The dvd_rip size boundary is constants.DVD_SIZE_THRESHOLD_BYTES, the same
+    value iso_detect._iso_size_fallback() uses, so a file cannot be judged
+    over-sized by one of them and under-sized by the other.
     """
     try:
-        p = Path(path)
-        with p.open("rb") as fh:
+        with path.open("rb") as fh:
             fh.seek(_XBOX_MAGIC_OFFSET)
             xbox_header = fh.read(20)
             if xbox_header == _XBOX_MAGIC:
@@ -32,8 +36,8 @@ def detect_xbox_image_type(path: str | Path) -> str:
             fh.seek(_ISO9660_OFFSET)
             iso_header = fh.read(5)
             if iso_header == _ISO9660_MAGIC:
-                file_size = p.stat().st_size
-                if file_size > _DVD_RIP_SIZE_THRESHOLD:
+                file_size = path.stat().st_size
+                if file_size > DVD_SIZE_THRESHOLD_BYTES:
                     return "dvd_rip"
                 return "iso9660"
 

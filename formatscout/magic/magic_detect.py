@@ -1,8 +1,17 @@
 import struct
 import tomllib
 from pathlib import Path
+from typing import BinaryIO
+
+from ..constants import ISO_LOGICAL_SECTOR_BYTES, ROOT_DIR_READ_CAP_BYTES
 
 _TOML_PATH = Path(__file__).parent / "magic_signatures.toml"
+
+# Raw Mode 2 CD geometry: each physical sector is 2352 bytes, of which the
+# first 24 are sync/header and the next ISO_LOGICAL_SECTOR_BYTES are the user
+# data an ISO 9660 structure actually lives in.
+_MODE2_SECTOR_BYTES = 2352
+_MODE2_DATA_OFFSET = 24
 
 with _TOML_PATH.open("rb") as _f:
     _RAW = tomllib.load(_f)
@@ -45,6 +54,32 @@ def _resolve_ps_generation_from_file(cnf_path: Path) -> str:
         return "unknown"
 
 
+def _read_mode2_user_data(fh: BinaryIO, start_lba: int, length: int) -> bytes:
+    """Read *length* bytes of logical user data starting at *start_lba* from a
+    raw Mode 2 image, one physical sector at a time.
+
+    Logical data is not contiguous on a raw CD image: every
+    _MODE2_SECTOR_BYTES-byte sector carries only ISO_LOGICAL_SECTOR_BYTES of
+    payload behind a _MODE2_DATA_OFFSET-byte sync/header. Reading straight
+    through, which this code used to do, splices the next sector's sync bytes
+    into the middle of the buffer and garbles every directory record past the
+    first sector. Callers must cap *length* themselves, see
+    ROOT_DIR_READ_CAP_BYTES.
+    """
+    chunks: list[bytes] = []
+    remaining = length
+    lba = start_lba
+    while remaining > 0:
+        fh.seek(lba * _MODE2_SECTOR_BYTES + _MODE2_DATA_OFFSET)
+        chunk = fh.read(min(remaining, ISO_LOGICAL_SECTOR_BYTES))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+        lba += 1
+    return b"".join(chunks)
+
+
 def _resolve_ps_generation(path: Path) -> str:
     """Classify PS1 vs PS2 from a raw CD-ROM sector read.
 
@@ -53,21 +88,23 @@ def _resolve_ps_generation(path: Path) -> str:
     Mode 2 CD-ROM marker, not proof the disc is a PlayStation title at all,
     so callers must treat "unknown" as no signal rather than default to PS1.
     """
-    # Mode 2 raw BIN: 2352-byte sectors, data payload starts at byte 24
-    SECTOR = 2352
-    DATA_OFF = 24
     try:
         with path.open("rb") as fh:
-            fh.seek(16 * SECTOR + DATA_OFF)
-            pvd = fh.read(2048)
+            pvd = _read_mode2_user_data(fh, 16, ISO_LOGICAL_SECTOR_BYTES)
             if len(pvd) < 190 or pvd[0] != 1:
                 return "unknown"
 
             root_lba = struct.unpack_from("<I", pvd, 158)[0]
             root_size = struct.unpack_from("<I", pvd, 166)[0]
+            if root_lba == 0 or root_size == 0:
+                return "unknown"
 
-            fh.seek(root_lba * SECTOR + DATA_OFF)
-            dir_data = fh.read(root_size)
+            # root_size is a 32-bit field read straight out of an untrusted
+            # image, so it can declare up to 4 GB. Cap it exactly as
+            # iso_detect._read_root_dir does before allocating anything.
+            dir_data = _read_mode2_user_data(
+                fh, root_lba, min(root_size, ROOT_DIR_READ_CAP_BYTES),
+            )
 
             system_cnf_lba = None
             system_cnf_size = 0
@@ -93,9 +130,10 @@ def _resolve_ps_generation(path: Path) -> str:
             if system_cnf_lba is None:
                 return "unknown"
 
-            fh.seek(system_cnf_lba * SECTOR + DATA_OFF)
-            content = fh.read(min(system_cnf_size or 512, 512)).decode("ascii", errors="replace")
-            return _classify_system_cnf(content)
+            raw_cnf = _read_mode2_user_data(
+                fh, system_cnf_lba, min(system_cnf_size or 512, 512),
+            )
+            return _classify_system_cnf(raw_cnf.decode("ascii", errors="replace"))
     except Exception:
         return "unknown"
 

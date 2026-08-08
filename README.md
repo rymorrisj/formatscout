@@ -51,7 +51,8 @@ flowchart TD
     IsoPvd -- "no PVD signal" --> XboxImg["xbox_image.detect_xbox_image_type()<br/>(internal module, byte-offset check only)"]
     XboxImg -- "'xiso' (XDVDFS magic @ 0x10000)" --> IsoR5["era=xbox, 0.9"]
     XboxImg -- "'dvd_rip' (ISO9660 magic, size &gt; 4GB)" --> IsoR6["era=xbox, 0.9<br/>requires_extraction=True"]
-    XboxImg -- "'iso9660' / 'unknown'" --> IsoFb["Tier 5: _iso_size_fallback()<br/>by size vs 4GB / 800MB -&gt; 0.0-0.2"]
+    XboxImg -- "'iso9660' (container confirmed, no platform)" --> IsoFb
+    XboxImg -- "'unknown'" --> IsoFb["Tier 5: _iso_size_fallback()<br/>by size vs 4 GiB / 800MB -&gt; 0.0-0.2<br/>era stays None; an iso9660 confirmation keeps<br/>confidence at 0.2 instead of 'no signal found'"]
 
     DirDispatch --> Autorun["Tier 4a: _detect_from_autorun()<br/>AUTORUN.INF OPEN=/RUN= -&gt; pointed .exe's PE header"]
     Autorun -- "era resolved" --> AutoR["era=dos/win98/winxp, 0.65-0.75"]
@@ -80,7 +81,13 @@ flowchart TD
      (internal, not a public module, see below) for byte-level Xbox xISO/DVD-rip
      identification. A raw DVD rip is still reported as `era="xbox"`, with
      `ScanResult.requires_extraction=True` signaling that extract-xiso needs to
-     run on it before use, a ready-to-use xISO leaves that flag `False`.
+     run on it before use, a ready-to-use xISO leaves that flag `False`. When
+     that check confirms ISO 9660 but rules out both Xbox shapes, the
+     confirmation is carried into the size fallback rather than discarded:
+     `era` stays `None`, because a filesystem signature names a container and
+     not a platform, but the result reports `confidence=0.2` with a
+     select-the-era-manually warning instead of collapsing into the
+     `confidence=0.0` "no signal found" an unrecognisable file gets.
    - CHD (`validators/chd_validator.py`): walks the CHD v5 metadata chain, a
      `CHGD` tag means Dreamcast, `CHTR`/`CHT2` means a standard CD/DVD track,
      PS1 vs PS2 is then guessed from the header's logical (uncompressed) size,
@@ -217,6 +224,20 @@ logs a final warning with the total skipped count across all parsed DATs, so
 a run against an MD5/CRC32-only DAT surfaces the problem instead of quietly
 producing zero new entries.
 
+Two properties of that run are worth knowing, since DAT files are third-party
+downloads and therefore untrusted input:
+
+- `dat_parser.parse_dat()` refuses any DAT that declares XML entities in its
+  DOCTYPE internal subset, which is the entity-expansion (billion laughs,
+  quadratic blowup) vector against `xml.etree.ElementTree`. The external
+  DOCTYPE that real Logiqx/Redump/No-Intro DATs carry is unaffected, since
+  ElementTree's default parser never fetches an external DTD. A rejected file
+  is logged and skipped; the rest of the run continues.
+- `build_index.py` writes the index to a sibling temp file and then
+  `os.replace()`s it into position. An interrupted or failed run therefore
+  leaves the previous `hash_index.json` intact rather than a truncated file
+  that no consumer can parse.
+
 ## Current coverage state
 
 As of this writing, `hash_index.json` has confirmed entries for exactly two
@@ -281,8 +302,18 @@ a hash match.
   missing or unreadable path raises rather than returning a result object.
 - The `requires_install` heuristic (DOS/Windows installer-only directory
   detection) is approximate, it checks whether every root-level executable
-  is on the install/setup blocklist. May need tuning based on real-world
-  testing.
+  is on the install/setup blocklist in `utils/blocklist.py`. Because a single
+  unblocked executable is enough to clear the whole directory, that list is
+  deliberately biased toward under-blocking: prefixes must be specific enough
+  that a real game binary cannot start with one, so short stems like `inst`
+  and `set` are matched exactly rather than as prefixes. May still need tuning
+  based on real-world testing.
+- Size thresholds are not all in the same unit. The 4 GB boundary shared by
+  the Xbox DVD-rip check and the ISO size fallback is binary
+  (`constants.DVD_SIZE_THRESHOLD_BYTES`, 4 GiB), while the PS1-versus-PS2
+  boundary in `detect_from_pvd()` is decimal 4.7 GB, because optical-disc
+  capacities are quoted that way. The two are intentionally different values
+  for different questions.
 - `requires_extraction` is set only by `iso_detect.detect_iso()`'s Xbox
   DVD-rip check today (size-over-threshold ISO 9660 media past the xISO
   magic-byte check), there is no equivalent signal for any other era. A
@@ -324,7 +355,7 @@ anything outside this package.
 
 ## Current test coverage
 
-All tests live under this package's own `tests/` folder, twelve `test_*.py`
+All tests live under this package's own `tests/` folder, thirteen `test_*.py`
 modules:
 
 - `test_classify.py` tests `classify.py`
@@ -341,21 +372,25 @@ modules:
 - `test_hash_lookup.py` tests `hashing/hash_lookup.py`
 - `test_dat_parser.py` tests `hashing/dat_parser.py`
 - `test_build_index.py` smoke-tests `hashing/build_index.py`'s CLI `main()`
-- `test_blocklist.py` tests `utils/blocklist.py`
+- `test_blocklist.py` tests `utils/blocklist.py`, including the short-prefix
+  false positives the block list used to produce
+- `test_detector.py` tests `detector.py`: the full suffix dispatch table, the
+  Tier-1 hash short-circuit, `detect()`'s never-raises contract, and
+  `_compute_requires_install()`
 
 `tests/smart_media_fixtures.py` holds shared synthetic fixtures (fake
 hash-index entries, minimal CHD/ISO/PE/CD-sector/DAT-XML builders) used across
 every one of the files above except `test_blocklist.py`. It is not itself
 collected as a test module.
 
-Three source modules have no dedicated test file of their own:
-`detector.py` (the public `detect()` entry point, its suffix dispatch table,
-and `_compute_requires_install()`), `hashing/title_match.py` (reached only
-indirectly through `test_classify.py`), and `xbox_image.py` (reached only
-indirectly through `test_iso_detect.py`). Within `test_directory_detect.py`,
-coverage is limited to `_detect_from_pe()` and `_parse_autorun_exe()`,
-`detect_directory()` and the `_detect_from_directory()` marker-file
-heuristics are not exercised. These are the known coverage gaps.
+Two source modules still have no dedicated test file of their own:
+`hashing/title_match.py` (reached only indirectly through `test_classify.py`)
+and `xbox_image.py` (reached only indirectly through `test_iso_detect.py`,
+which includes one end-to-end case driving the real byte-offset check rather
+than a monkeypatched stand-in). Within `test_directory_detect.py`, coverage is
+limited to `_detect_from_pe()` and `_parse_autorun_exe()`, `detect_directory()`
+and the `_detect_from_directory()` marker-file heuristics are not exercised.
+These are the remaining known coverage gaps.
 
 The one previously-deferred gap, magic_detect.py parsing
 `magic_signatures.toml` at module-import time rather than inside a function,

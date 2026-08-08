@@ -1,6 +1,12 @@
 import struct
 from pathlib import Path
 
+from .constants import (
+    DVD_SIZE_THRESHOLD_BYTES,
+    ISO_LOGICAL_SECTOR_BYTES,
+    POINTER_FILE_READ_CAP_BYTES,
+    ROOT_DIR_READ_CAP_BYTES,
+)
 from .xbox_image import detect_xbox_image_type
 from .magic.magic_detect import detect_from_magic
 from .result import ScanResult
@@ -35,7 +41,11 @@ def detect_iso(path: Path) -> ScanResult:
             requires_extraction=True,
         )
 
-    return _iso_size_fallback(path)
+    # "iso9660" means the ISO 9660 magic was found and the file is not an Xbox
+    # image. That is a real signal even though it names no platform, so it is
+    # passed down rather than discarded: it separates "a genuine disc image we
+    # cannot attribute" from "bytes that are not a recognisable image at all".
+    return _iso_size_fallback(path, iso9660_confirmed=(xbox_kind == "iso9660"))
 
 
 def detect_cue(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> ScanResult:
@@ -88,15 +98,18 @@ def detect_from_pvd(iso_path: Path) -> ScanResult:
         # signals, unlike a substring match against a title's volume label
         # (e.g. "COMMANDOS" containing "DOS"), so they must not be
         # short-circuited by the weaker keyword check running first.
-        dir_data = _read_root_dir(iso_path, pvd)
+        # Read once (see _read_root_dir) and also parse once: both structural
+        # checks below consume the same entry-name list rather than each
+        # re-walking the raw directory records.
+        root_names = _root_dir_entry_names(_read_root_dir(iso_path, pvd))
 
-        if "PS3_DISC.SFB" in _root_dir_entry_names(dir_data):
+        if "PS3_DISC.SFB" in root_names:
             return ScanResult(
                 title=None, platform=None, era="ps3", confidence=0.9,
                 reason="ISO 9660 root directory contains PS3_DISC.SFB, PS3 disc image",
             )
 
-        xbe_result = _detect_from_xbe_scan(dir_data)
+        xbe_result = _xbe_result_from_names(root_names)
         if xbe_result.era is not None:
             return xbe_result
 
@@ -158,11 +171,11 @@ def _read_root_dir(iso_path: Path, pvd: bytes) -> bytes:
         return b""
     root_lba = struct.unpack_from("<I", pvd, 158)[0]
     root_size = struct.unpack_from("<I", pvd, 166)[0]
-    if root_lba == 0 or root_size == 0 or root_size > 65536:
+    if root_lba == 0 or root_size == 0 or root_size > ROOT_DIR_READ_CAP_BYTES:
         return b""
     try:
         with iso_path.open("rb") as fh:
-            fh.seek(root_lba * 2048)
+            fh.seek(root_lba * ISO_LOGICAL_SECTOR_BYTES)
             return fh.read(root_size)
     except OSError:
         return b""
@@ -191,8 +204,19 @@ def _root_dir_entry_names(dir_data: bytes) -> list[str]:
 
 
 def _detect_from_xbe_scan(dir_data: bytes) -> ScanResult:
+    """Scan raw ISO 9660 root directory bytes for an .xbe entry.
+
+    Takes pre-read bytes and never touches the filesystem itself, see
+    _read_root_dir. detect_from_pvd() calls _xbe_result_from_names() directly
+    with the entry list it has already parsed, so this wrapper exists for
+    callers holding only the raw bytes.
+    """
+    return _xbe_result_from_names(_root_dir_entry_names(dir_data))
+
+
+def _xbe_result_from_names(names: list[str]) -> ScanResult:
     _null = ScanResult(title=None, platform=None, era=None, confidence=0.0, reason="")
-    for name in _root_dir_entry_names(dir_data):
+    for name in names:
         if name.endswith(".XBE"):
             return ScanResult(
                 title=None, platform=None, era="xbox", confidence=0.8,
@@ -201,33 +225,53 @@ def _detect_from_xbe_scan(dir_data: bytes) -> ScanResult:
     return _null
 
 
-def _iso_size_fallback(path: Path) -> ScanResult:
+def _iso_size_fallback(path: Path, *, iso9660_confirmed: bool = False) -> ScanResult:
+    """Lowest tier: nothing named a platform, so decide what little can be said
+    from file size alone.
+
+    iso9660_confirmed means detect_xbox_image_type() found the ISO 9660 magic
+    and ruled out both Xbox shapes. era stays None either way, because a
+    filesystem signature identifies the container, not the platform, and
+    guessing one here would be a fabrication. What it does change is that the
+    result is no longer reported as "no signal found": a confirmed ISO 9660
+    image whose size is unremarkable is a different situation for the caller
+    than an unrecognisable file, and only the former is worth prompting a user
+    to label manually.
+    """
+    signal = (
+        "ISO 9660 magic confirmed but no platform signal"
+        if iso9660_confirmed
+        else "no PVD signal"
+    )
     try:
         size = path.stat().st_size
     except OSError:
         return ScanResult(title=None, platform=None, era=None, confidence=0.0, reason="no signal found")
-    if size > 4 * 1024 ** 3:
+    if size > DVD_SIZE_THRESHOLD_BYTES:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.2,
-            reason="ISO exceeds 4 GB but no PVD signal",
+            reason=f"ISO exceeds 4 GB, {signal}",
             warnings=["could be PS2 or Xbox OG, please select era manually"],
         )
     if size < 800 * 1024 * 1024:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.2,
-            reason="ISO under 800 MB but no PVD signal",
+            reason=f"ISO under 800 MB, {signal}",
             warnings=["era ambiguous, please select era manually"],
         )
+    if iso9660_confirmed:
+        return ScanResult(
+            title=None, platform=None, era=None, confidence=0.2,
+            reason="ISO 9660 magic confirmed but no platform signal, size is inconclusive",
+            warnings=["valid ISO 9660 disc image with no platform signal, please select era manually"],
+        )
     return ScanResult(title=None, platform=None, era=None, confidence=0.0, reason="no signal found")
-
-
-_POINTER_FILE_READ_CAP_BYTES = 64 * 1024  # cue/gdi pointer files are a few hundred bytes
 
 
 def _cue_bin_path(cue_path: Path) -> Path | None:
     try:
         with open(cue_path, "rb") as f:
-            raw = f.read(_POINTER_FILE_READ_CAP_BYTES)
+            raw = f.read(POINTER_FILE_READ_CAP_BYTES)
         for line in raw.decode("utf-8", errors="replace").splitlines():
             line = line.strip()
             if line.upper().startswith("FILE "):

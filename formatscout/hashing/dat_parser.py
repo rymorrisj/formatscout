@@ -64,16 +64,47 @@ def _resolve_era_from_platform(platform: str | None) -> str | None:
     return None
 
 
+def _reject_internal_entities(raw: bytes, path: Path) -> None:
+    """Refuse a DAT whose DOCTYPE declares entities in its internal subset.
+
+    xml.etree.ElementTree expands internal entity declarations, which makes it
+    vulnerable to entity-expansion denial of service (billion laughs, quadratic
+    blowup) on untrusted input, and DAT files are third-party downloads. The
+    usual mitigation, defusedxml, is a new runtime dependency this package does
+    not have, and this Python's C XMLParser exposes no expat handle to install
+    entity handlers on, so the declaration is rejected up front instead.
+
+    Only the internal subset (the bracketed section of a DOCTYPE) is inspected,
+    since that is the sole place an entity can be declared: external DTDs are
+    never fetched by ElementTree's default parser, so the external DOCTYPE that
+    real Logiqx/Redump/No-Intro DATs carry stays perfectly valid, and a game
+    title that merely contains the text "<!ENTITY" cannot trip this.
+    """
+    doctype = raw.find(b"<!DOCTYPE")
+    if doctype == -1:
+        return
+    subset_start = raw.find(b"[", doctype)
+    subset_end = raw.find(b"]", doctype)
+    if subset_start == -1 or subset_end <= subset_start:
+        return
+    if b"<!ENTITY" in raw[subset_start:subset_end]:
+        raise ValueError(
+            f"Failed to parse DAT file {path}: refusing a document that declares "
+            "XML entities in its DOCTYPE internal subset (entity-expansion risk)"
+        )
+
+
 def parse_dat(path: Path) -> list[dict]:
     source = path.stem
     records: list[dict] = []
 
+    raw = path.read_bytes()
+    _reject_internal_entities(raw, path)
+
     try:
-        tree = ET.parse(path)
+        root = ET.fromstring(raw)
     except ET.ParseError as exc:
         raise ValueError(f"Failed to parse DAT file {path}: {exc}") from exc
-
-    root = tree.getroot()
 
     # Extract platform hint from <header><name> if present (TOSEC and some Redump DATs)
     platform: str | None = None

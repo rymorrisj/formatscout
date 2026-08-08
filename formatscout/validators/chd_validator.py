@@ -89,7 +89,7 @@ def detect_chd_platform(path: Path) -> ScanResult:
             while meta_offset != 0:
                 if len(visited_offsets) >= _MAX_METADATA_ENTRIES or meta_offset in visited_offsets:
                     break  # cycle or pathologically long chain, bail out rather than spin
-                if meta_offset < 0 or meta_offset >= file_size:
+                if meta_offset >= file_size:
                     break  # next_offset points outside the file, malformed/crafted chain
                 visited_offsets.add(meta_offset)
 

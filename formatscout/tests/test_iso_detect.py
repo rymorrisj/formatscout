@@ -474,12 +474,14 @@ class TestDetectIso:
         assert result.requires_extraction is False
         assert result.warnings
 
-    @pytest.mark.parametrize("image_type", NON_XBOX_IMAGE_TYPES)
-    def test_no_signal_found_in_normal_size_range(self, tmp_path: Path, monkeypatch, image_type: str):
+    def test_unknown_image_type_in_normal_size_range_is_no_signal(self, tmp_path: Path, monkeypatch):
+        """"unknown" means not even the ISO 9660 magic was found, so at an
+        unremarkable size there is genuinely nothing to report.
+        """
         from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
-        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: image_type)
+        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: "unknown")
         iso_path = tmp_path / "game.iso"
         iso_path.touch()
         os.truncate(iso_path, 1_000_000_000)
@@ -487,7 +489,53 @@ class TestDetectIso:
         result = iso_detect.detect_iso(iso_path)
         assert result.era is None
         assert result.confidence == 0.0
+        assert result.reason == "no signal found"
         assert result.requires_extraction is False
+
+    def test_iso9660_confirmation_is_not_discarded_in_normal_size_range(self, tmp_path: Path, monkeypatch):
+        """"iso9660" is a real signal even at an unremarkable size: the
+        container format is confirmed, only the platform is unknown. It must
+        not collapse into the same zero-confidence "no signal found" an
+        unrecognisable file gets, since the two call for different handling.
+        era still stays None, a filesystem signature names no platform.
+        """
+        from formatscout import iso_detect
+
+        monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
+        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: "iso9660")
+        iso_path = tmp_path / "game.iso"
+        iso_path.touch()
+        os.truncate(iso_path, 1_000_000_000)
+
+        result = iso_detect.detect_iso(iso_path)
+        assert result.era is None
+        assert result.confidence == 0.2
+        assert result.reason != "no signal found"
+        assert "ISO 9660 magic confirmed" in result.reason
+        assert result.warnings
+        assert result.requires_extraction is False
+
+    @pytest.mark.parametrize("image_type", NON_XBOX_IMAGE_TYPES)
+    def test_size_fallback_reason_reflects_whether_iso9660_was_confirmed(
+        self, tmp_path: Path, monkeypatch, image_type: str,
+    ):
+        """Both fall to the same size branch at the same confidence, but the
+        reason string must still say which of the two situations it was.
+        """
+        from formatscout import iso_detect
+
+        monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
+        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: image_type)
+        iso_path = tmp_path / "game.iso"
+        iso_path.touch()
+        os.truncate(iso_path, 500 * 1024 * 1024)
+
+        result = iso_detect.detect_iso(iso_path)
+        assert result.confidence == 0.2
+        if image_type == "iso9660":
+            assert "ISO 9660 magic confirmed" in result.reason
+        else:
+            assert "no PVD signal" in result.reason
 
 
 # ---------------------------------------------------------------------------
