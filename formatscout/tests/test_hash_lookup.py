@@ -1,15 +1,15 @@
-"""Tests for backend.service.utils.smart_media_detector.hashing.hash_lookup."""
+"""Tests for formatscout.hashing.hash_lookup."""
 
 import os
 from pathlib import Path
 
 import pytest
 
-from backend.service.utils.smart_media_detector.tests import smart_media_fixtures as fx
+from formatscout.tests import smart_media_fixtures as fx
 
 
 def _hash_lookup_module():
-    from backend.service.utils.smart_media_detector.hashing import hash_lookup
+    from formatscout.hashing import hash_lookup
     return hash_lookup
 
 

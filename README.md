@@ -289,10 +289,9 @@ anything outside this package.
 
 ### Extraction readiness checklist
 
-- [x] Zero `backend.*` imports anywhere under the package (excluding
-  `tests/`, which still import via an old pre-extraction module path, a
-  known, separately-tracked gap, see "Running just this package's tests"
-  below).
+- [x] Zero `backend.*` imports anywhere under the package, including
+  `tests/`: the suite now imports itself via `formatscout.tests`, not the
+  old pre-extraction monorepo path.
 - [x] Xbox optical-media identification (`xbox_image.py`) is fully internal
   and vendored, not a dependency on any external sibling module; its signal
   reaches callers only through `ScanResult.requires_extraction`, never by
@@ -350,11 +349,7 @@ pytest formatscout/tests/
 Run from the repository root. This repo's `pyproject.toml` has no
 `[tool.pytest.ini_options]`/`testpaths` section of its own yet, so a bare
 `pytest` from this repo's root currently relies on default discovery rather
-than an explicit `testpaths` entry. Also see the comment near the top of
-this repo's `pyproject.toml`: the tests under `formatscout/tests/` still
-import themselves via the old monorepo path and will not currently import
-successfully from this package's own root, a known, separately-tracked gap,
-not something this command fixes.
+than an explicit `testpaths` entry.
 
 ## Disclaimer
 

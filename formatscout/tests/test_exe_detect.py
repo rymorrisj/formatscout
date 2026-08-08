@@ -1,4 +1,4 @@
-"""Tests for backend.service.utils.smart_media_detector.exe_detect.
+"""Tests for formatscout.exe_detect.
 
 Covers the Bug 3 fix from the prior session: a Subsystem gate must be applied
 before the era branches run, and every DOS-fallback branch must report the
@@ -8,11 +8,11 @@ PE signature) produced it.
 
 from pathlib import Path
 
-from backend.service.utils.smart_media_detector.tests import smart_media_fixtures as fx
+from formatscout.tests import smart_media_fixtures as fx
 
 
 def _detect_exe(path: Path):
-    from backend.service.utils.smart_media_detector.exe_detect import detect_exe
+    from formatscout.exe_detect import detect_exe
     return detect_exe(path)
 
 

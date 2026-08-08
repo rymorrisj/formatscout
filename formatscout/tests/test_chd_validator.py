@@ -1,18 +1,18 @@
-"""Tests for backend.service.utils.smart_media_detector.validators.chd_validator."""
+"""Tests for formatscout.validators.chd_validator."""
 
 from pathlib import Path
 
-from backend.service.utils.smart_media_detector.tests import smart_media_fixtures as fx
+from formatscout.tests import smart_media_fixtures as fx
 
 
 def _extract_embedded_sha1(path: Path):
-    from backend.service.utils.smart_media_detector.validators.chd_validator import extract_embedded_sha1
+    from formatscout.validators.chd_validator import extract_embedded_sha1
     return extract_embedded_sha1(path)
 
 
 def _detect(path: Path):
-    from backend.service.utils.smart_media_detector.validators.chd_validator import detect
-    return detect(path)
+    from formatscout.validators.chd_validator import detect_chd_platform
+    return detect_chd_platform(path)
 
 
 # ---------------------------------------------------------------------------

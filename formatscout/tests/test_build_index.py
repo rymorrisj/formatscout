@@ -1,4 +1,4 @@
-"""Tests for backend.service.utils.smart_media_detector.hashing.build_index.
+"""Tests for formatscout.hashing.build_index.
 
 build_index.py is a CLI entry point (python -m ...build_index --dats <dir>),
 so main() reads argparse args from sys.argv directly rather than taking
@@ -22,12 +22,12 @@ from pathlib import Path
 
 import pytest
 
-from backend.service.utils.smart_media_detector.tests import smart_media_fixtures as fx
+from formatscout.tests import smart_media_fixtures as fx
 
 
 class TestBuildIndexMain:
     def _run(self, monkeypatch, argv: list[str]) -> None:
-        from backend.service.utils.smart_media_detector.hashing import build_index
+        from formatscout.hashing import build_index
 
         monkeypatch.setattr(sys, "argv", argv)
         root_handlers_before = list(logging.root.handlers)

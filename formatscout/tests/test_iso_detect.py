@@ -1,4 +1,4 @@
-"""Tests for backend.service.utils.smart_media_detector.iso_detect."""
+"""Tests for formatscout.iso_detect."""
 
 import os
 import textwrap
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.service.utils.smart_media_detector.tests import smart_media_fixtures as fx
+from formatscout.tests import smart_media_fixtures as fx
 
 
 # ---------------------------------------------------------------------------
@@ -17,7 +17,7 @@ class TestCueBinPath:
     """Unit tests for the internal _cue_bin_path() helper."""
 
     def _call(self, cue_path: Path) -> Path | None:
-        from backend.service.utils.smart_media_detector.iso_detect import _cue_bin_path
+        from formatscout.iso_detect import _cue_bin_path
         return _cue_bin_path(cue_path)
 
     def test_returns_none_when_no_file_lines(self, tmp_path: Path):
@@ -79,7 +79,7 @@ class TestCueBinPath:
 
 class TestRootDirEntryNames:
     def _call(self, dir_data: bytes) -> list[str]:
-        from backend.service.utils.smart_media_detector.iso_detect import _root_dir_entry_names
+        from formatscout.iso_detect import _root_dir_entry_names
         return _root_dir_entry_names(dir_data)
 
     def test_empty_bytes_returns_empty_list(self):
@@ -117,7 +117,7 @@ class TestRootDirEntryNames:
 
 class TestDetectFromXbeScan:
     def _call(self, dir_data: bytes):
-        from backend.service.utils.smart_media_detector.iso_detect import _detect_from_xbe_scan
+        from formatscout.iso_detect import _detect_from_xbe_scan
         return _detect_from_xbe_scan(dir_data)
 
     def test_finds_xbe_case_insensitively(self):
@@ -146,7 +146,7 @@ class TestDetectFromXbeScan:
 
 class TestIsoDetectReopenAvoidance:
     def test_root_dir_entry_names_and_xbe_scan_never_touch_the_filesystem(self, monkeypatch):
-        from backend.service.utils.smart_media_detector.iso_detect import (
+        from formatscout.iso_detect import (
             _detect_from_xbe_scan,
             _root_dir_entry_names,
         )
@@ -168,7 +168,7 @@ class TestIsoDetectReopenAvoidance:
         inside _read_root_dir(), not one more per downstream helper that
         consumes the resulting dir_data.
         """
-        from backend.service.utils.smart_media_detector.iso_detect import detect_from_pvd
+        from formatscout.iso_detect import detect_from_pvd
 
         iso_path = fx.write_pvd_iso(tmp_path / "game.iso", root_entries=["GAME.XBE"])
 
@@ -198,7 +198,7 @@ class TestIsoDetectReopenAvoidance:
 
 class TestDetectFromPvd:
     def _call(self, iso_path: Path):
-        from backend.service.utils.smart_media_detector.iso_detect import detect_from_pvd
+        from formatscout.iso_detect import detect_from_pvd
         return detect_from_pvd(iso_path)
 
     def test_ps3_disc_sfb_root_entry(self, tmp_path: Path):
@@ -343,7 +343,7 @@ class TestDetectFromPvd:
 
 class TestDetectIso:
     def test_magic_match_short_circuits_before_pvd(self, tmp_path: Path, monkeypatch):
-        from backend.service.utils.smart_media_detector import iso_detect
+        from formatscout import iso_detect
 
         def _fake_magic(path, extension):
             assert extension == "iso"
@@ -359,7 +359,7 @@ class TestDetectIso:
         assert result.reason == "fake magic match"
 
     def test_falls_through_to_pvd_when_no_magic_match(self, tmp_path: Path, monkeypatch):
-        from backend.service.utils.smart_media_detector import iso_detect
+        from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
         iso_path = fx.write_pvd_iso(tmp_path / "game.iso", volume_id="WINXP")
@@ -368,7 +368,7 @@ class TestDetectIso:
         assert result.era == "winxp"
 
     def test_falls_through_to_is_xiso_when_no_pvd_signal(self, tmp_path: Path, monkeypatch):
-        from backend.service.utils.smart_media_detector import iso_detect
+        from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
         monkeypatch.setattr(iso_detect, "is_xiso", lambda path: True)
@@ -381,7 +381,7 @@ class TestDetectIso:
         assert "XDVDFS" in result.reason
 
     def test_falls_through_to_size_fallback_over_4gb(self, tmp_path: Path, monkeypatch):
-        from backend.service.utils.smart_media_detector import iso_detect
+        from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
         monkeypatch.setattr(iso_detect, "is_xiso", lambda path: False)
@@ -395,7 +395,7 @@ class TestDetectIso:
         assert result.warnings
 
     def test_falls_through_to_size_fallback_under_800mb(self, tmp_path: Path, monkeypatch):
-        from backend.service.utils.smart_media_detector import iso_detect
+        from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
         monkeypatch.setattr(iso_detect, "is_xiso", lambda path: False)
@@ -409,7 +409,7 @@ class TestDetectIso:
         assert result.warnings
 
     def test_no_signal_found_in_normal_size_range(self, tmp_path: Path, monkeypatch):
-        from backend.service.utils.smart_media_detector import iso_detect
+        from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
         monkeypatch.setattr(iso_detect, "is_xiso", lambda path: False)
@@ -435,7 +435,7 @@ class TestDetectIso:
 
 class TestDetectCue:
     def _call(self, cue_path: Path, dir_cache=None):
-        from backend.service.utils.smart_media_detector.iso_detect import detect_cue
+        from formatscout.iso_detect import detect_cue
         return detect_cue(cue_path, dir_cache)
 
     def test_no_resolvable_bin_returns_zero_confidence_with_warning(self, tmp_path: Path):
@@ -524,9 +524,9 @@ class TestDetectCue:
 
 class TestDetectChd:
     def test_delegates_to_chd_validator_detect(self, tmp_path: Path, monkeypatch):
-        from backend.service.utils.smart_media_detector import iso_detect
-        from backend.service.utils.smart_media_detector.result import ScanResult
-        from backend.service.utils.smart_media_detector.validators import chd_validator
+        from formatscout import iso_detect
+        from formatscout.result import ScanResult
+        from formatscout.validators import chd_validator
 
         sentinel = ScanResult(title=None, platform=None, era="dreamcast", confidence=1.0, reason="sentinel")
         captured = {}
@@ -535,7 +535,7 @@ class TestDetectChd:
             captured["path"] = path
             return sentinel
 
-        monkeypatch.setattr(chd_validator, "detect", _fake_detect)
+        monkeypatch.setattr(chd_validator, "detect_chd_platform", _fake_detect)
         chd_path = tmp_path / "game.chd"
         chd_path.write_bytes(b"\x00")
 

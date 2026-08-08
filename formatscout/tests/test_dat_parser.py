@@ -1,15 +1,15 @@
-"""Tests for backend.service.utils.smart_media_detector.hashing.dat_parser."""
+"""Tests for formatscout.hashing.dat_parser."""
 
 from pathlib import Path
 
 import pytest
 
-from backend.service.utils.smart_media_detector.tests import smart_media_fixtures as fx
+from formatscout.tests import smart_media_fixtures as fx
 
 
 class TestParseDat:
     def _call(self, path: Path) -> list[dict]:
-        from backend.service.utils.smart_media_detector.hashing.dat_parser import parse_dat
+        from formatscout.hashing.dat_parser import parse_dat
         return parse_dat(path)
 
     def test_single_game_single_rom(self, tmp_path: Path):

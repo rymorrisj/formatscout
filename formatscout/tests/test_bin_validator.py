@@ -1,4 +1,4 @@
-"""Tests for backend.service.utils.smart_media_detector.validators.bin_validator.
+"""Tests for formatscout.validators.bin_validator.
 
 resolve_bin_cue() actually has 7 distinct reachable outcomes, not 5: no-sibling-cue
 (confidence 0.3) and cue-found-but-unparseable (confidence 0.2) are both real
@@ -9,16 +9,16 @@ non-None track type 0.25). All seven are covered below.
 
 from pathlib import Path
 
-from backend.service.utils.smart_media_detector.tests import smart_media_fixtures as fx
+from formatscout.tests import smart_media_fixtures as fx
 
 
 def _resolve(bin_path: Path, dir_cache=None):
-    from backend.service.utils.smart_media_detector.validators.bin_validator import resolve_bin_cue
+    from formatscout.validators.bin_validator import resolve_bin_cue
     return resolve_bin_cue(bin_path, dir_cache)
 
 
 def _find_cue(bin_path: Path, dir_cache=None):
-    from backend.service.utils.smart_media_detector.validators.bin_validator import _find_cue
+    from formatscout.validators.bin_validator import _find_cue
     return _find_cue(bin_path, dir_cache)
 
 
@@ -225,7 +225,7 @@ class TestFindCueDirCache:
 
 class TestParseCueTrackType:
     def _call(self, cue_path: Path):
-        from backend.service.utils.smart_media_detector.validators.bin_validator import _parse_cue_track_type
+        from formatscout.validators.bin_validator import _parse_cue_track_type
         return _parse_cue_track_type(cue_path)
 
     def test_returns_first_track_type(self, tmp_path: Path):

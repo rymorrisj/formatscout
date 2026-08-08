@@ -1,4 +1,4 @@
-"""Tests for backend.service.utils.smart_media_detector.verify.
+"""Tests for formatscout.verify.
 
 Trivial three-state dispatch (matched / mismatched / not_in_index), hash-only,
 no magic/structural/directory/fallback tiers involved.
@@ -6,11 +6,11 @@ no magic/structural/directory/fallback tiers involved.
 
 from pathlib import Path
 
-from backend.service.utils.smart_media_detector.tests import smart_media_fixtures as fx
+from formatscout.tests import smart_media_fixtures as fx
 
 
 def _verify(path: Path, expected_sha1: str):
-    from backend.service.utils.smart_media_detector.verify import verify
+    from formatscout.verify import verify
     return verify(path, expected_sha1)
 
 

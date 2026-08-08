@@ -1,4 +1,4 @@
-"""Shared synthetic fixtures for backend.service.utils.smart_media_detector tests.
+"""Shared synthetic fixtures for formatscout tests.
 
 Not a test module itself (no test_ prefix, nothing here is collected by pytest).
 Plain helper functions/constants, imported directly by test_classify.py and
@@ -13,6 +13,7 @@ in-memory/tmp_path-only synthetic index built from scratch.
 import hashlib
 import json
 import struct
+import sys
 import zlib
 from pathlib import Path
 
@@ -37,7 +38,7 @@ def _synthetic_sha1(label: str) -> str:
     already in the index under some other file's hash', not derived from
     any fixture file's real content, since that's the point of these entries.
     """
-    return hashlib.sha1(f"peach1up-synthetic-fixture:{label}".encode()).hexdigest()
+    return hashlib.sha1(f"formatscout-synthetic-fixture:{label}".encode()).hexdigest()
 
 
 def patch_classify_index(monkeypatch, index_path: Path) -> None:
@@ -51,7 +52,8 @@ def patch_classify_index(monkeypatch, index_path: Path) -> None:
     constant is the only way to run classify() against a synthetic index
     without touching the real 88MB file.
     """
-    from backend.service.utils.smart_media_detector import classify as classify_module
+    import formatscout.classify
+    classify_module = sys.modules["formatscout.classify"]
 
     monkeypatch.setattr(classify_module, "_INDEX_PATH", index_path)
 
@@ -61,7 +63,8 @@ def patch_verify_index(monkeypatch, index_path: Path) -> None:
     same rationale and pattern as patch_classify_index(). verify.py declares its
     own private _INDEX_PATH separate from classify.py's, so it needs its own patch.
     """
-    from backend.service.utils.smart_media_detector import verify as verify_module
+    import formatscout.verify
+    verify_module = sys.modules["formatscout.verify"]
 
     monkeypatch.setattr(verify_module, "_INDEX_PATH", index_path)
 
@@ -78,7 +81,8 @@ def patch_detector_index(monkeypatch, index_path: Path) -> None:
     already catches and falls through on, so this is the fast, minimal way to
     isolate a directory-dispatch test from the real index without building one.
     """
-    from backend.service.utils.smart_media_detector import detector as detector_module
+    import formatscout.detector
+    detector_module = sys.modules["formatscout.detector"]
 
     monkeypatch.setattr(detector_module, "_INDEX_PATH", index_path)
 
@@ -87,10 +91,10 @@ def patch_detector_index(monkeypatch, index_path: Path) -> None:
 # Part 1.1, synthetic hash_index.json (5 entries)
 # ---------------------------------------------------------------------------
 
-VERIFIED_CONTENT = b"PEACH1UP_SYNTHETIC_VERIFIED_PS1_DISC"
-CAUTION_MD5_CONTENT = b"PEACH1UP_SYNTHETIC_CAUTION_MD5_SOURCE"
-CAUTION_CRC32_CONTENT = b"PEACH1UP_SYNTHETIC_CAUTION_CRC32_SOURCE"
-UNINDEXED_CONTENT = b"PEACH1UP_SYNTHETIC_UNINDEXED_FILE_NO_HASH_MATCH"
+VERIFIED_CONTENT = b"FORMATSCOUT_SYNTHETIC_VERIFIED_PS1_DISC"
+CAUTION_MD5_CONTENT = b"FORMATSCOUT_SYNTHETIC_CAUTION_MD5_SOURCE"
+CAUTION_CRC32_CONTENT = b"FORMATSCOUT_SYNTHETIC_CAUTION_CRC32_SOURCE"
+UNINDEXED_CONTENT = b"FORMATSCOUT_SYNTHETIC_UNINDEXED_FILE_NO_HASH_MATCH"
 
 CHD_EMBEDDED_SHA1 = _synthetic_sha1("chd-embedded-rawsha1")
 CAUTION_ENTRY_SHA1 = _synthetic_sha1("caution-entry-own-sha1")

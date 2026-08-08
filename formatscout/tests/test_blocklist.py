@@ -1,8 +1,8 @@
-"""Tests for backend.service.utils.smart_media_detector.utils.blocklist."""
+"""Tests for formatscout.utils.blocklist."""
 
 import pytest
 
-from backend.service.utils.smart_media_detector.utils.blocklist import (
+from formatscout.utils.blocklist import (
     BLOCK_EXACT,
     BLOCK_PREFIXES,
     BLOCK_SUFFIXES,

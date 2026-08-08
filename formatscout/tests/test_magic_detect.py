@@ -1,11 +1,11 @@
-"""Tests for backend.service.utils.smart_media_detector.magic.magic_detect."""
+"""Tests for formatscout.magic.magic_detect."""
 
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-from backend.service.utils.smart_media_detector.tests import smart_media_fixtures as fx
+from formatscout.tests import smart_media_fixtures as fx
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +25,7 @@ class TestDetectFromMagicContinueVsReturn:
         If the ambiguous branch incorrectly `return`ed on "unknown" instead
         of `continue`ing, this test would see (None, "") instead.
         """
-        from backend.service.utils.smart_media_detector.magic.magic_detect import detect_from_magic
+        from formatscout.magic.magic_detect import detect_from_magic
 
         blob = bytearray(64)
         sync = fx.CDROM_SYNC_AMBIGUOUS_BLOB
@@ -46,7 +46,7 @@ class TestDetectFromMagicContinueVsReturn:
         present afterward, confirms the fall-through correctly exhausts the
         list and returns (None, ""), not a false positive.
         """
-        from backend.service.utils.smart_media_detector.magic.magic_detect import detect_from_magic
+        from formatscout.magic.magic_detect import detect_from_magic
 
         path = tmp_path / "ambiguous_only.bin"
         path.write_bytes(fx.CDROM_SYNC_AMBIGUOUS_BLOB)
@@ -59,7 +59,7 @@ class TestDetectFromMagicContinueVsReturn:
 
 class TestDetectFromMagicPerSignature:
     def test_n64_big_endian(self, tmp_path: Path):
-        from backend.service.utils.smart_media_detector.magic.magic_detect import detect_from_magic
+        from formatscout.magic.magic_detect import detect_from_magic
 
         path = tmp_path / "game.bin"
         path.write_bytes(fx.N64_BIG_ENDIAN_BLOB)
@@ -67,7 +67,7 @@ class TestDetectFromMagicPerSignature:
         assert era == "n64"
 
     def test_n64_byteswapped(self, tmp_path: Path):
-        from backend.service.utils.smart_media_detector.magic.magic_detect import detect_from_magic
+        from formatscout.magic.magic_detect import detect_from_magic
 
         path = tmp_path / "game.bin"
         path.write_bytes(fx.N64_BYTESWAPPED_BLOB)
@@ -75,7 +75,7 @@ class TestDetectFromMagicPerSignature:
         assert era == "n64"
 
     def test_n64_little_endian(self, tmp_path: Path):
-        from backend.service.utils.smart_media_detector.magic.magic_detect import detect_from_magic
+        from formatscout.magic.magic_detect import detect_from_magic
 
         path = tmp_path / "game.bin"
         path.write_bytes(fx.N64_LITTLE_ENDIAN_BLOB)
@@ -83,7 +83,7 @@ class TestDetectFromMagicPerSignature:
         assert era == "n64"
 
     def test_nes(self, tmp_path: Path):
-        from backend.service.utils.smart_media_detector.magic.magic_detect import detect_from_magic
+        from formatscout.magic.magic_detect import detect_from_magic
 
         path = tmp_path / "game.bin"
         path.write_bytes(fx.NES_HEADER_BLOB)
@@ -91,7 +91,7 @@ class TestDetectFromMagicPerSignature:
         assert era == "nes"
 
     def test_dreamcast(self, tmp_path: Path):
-        from backend.service.utils.smart_media_detector.magic.magic_detect import detect_from_magic
+        from formatscout.magic.magic_detect import detect_from_magic
 
         path = tmp_path / "game.bin"
         path.write_bytes(fx.DREAMCAST_IP_BIN_BLOB)
@@ -105,8 +105,8 @@ class TestDetectFromMagicPerSignature:
 
 class TestResolvePsGenerationFromFile:
     def _call(self, cnf_path: Path) -> str:
-        from backend.service.utils.smart_media_detector.magic.magic_detect import resolve_ps_generation_from_file
-        return resolve_ps_generation_from_file(cnf_path)
+        from formatscout.magic.magic_detect import _resolve_ps_generation_from_file
+        return _resolve_ps_generation_from_file(cnf_path)
 
     def test_boot_key_resolves_ps1(self, tmp_path: Path):
         cnf = tmp_path / "SYSTEM.CNF"
@@ -129,7 +129,7 @@ class TestResolvePsGenerationFromFile:
 
 class TestResolvePsGenerationFromSector:
     def _call(self, path: Path) -> str:
-        from backend.service.utils.smart_media_detector.magic.magic_detect import _resolve_ps_generation
+        from formatscout.magic.magic_detect import _resolve_ps_generation
         return _resolve_ps_generation(path)
 
     def test_pvd_present_system_cnf_present_boot_resolves_ps1(self, tmp_path: Path):
@@ -167,7 +167,7 @@ class TestResolvePsGenerationFromSector:
 
 class TestClassifySystemCnf:
     def _call(self, content: str) -> str:
-        from backend.service.utils.smart_media_detector.magic.magic_detect import _classify_system_cnf
+        from formatscout.magic.magic_detect import _classify_system_cnf
         return _classify_system_cnf(content)
 
     def test_boot_only_is_ps1(self):
@@ -204,7 +204,7 @@ class TestClassifySystemCnf:
 
 class TestMalformedTomlAtImportTime:
     def test_malformed_toml_raises_at_import_not_at_call(self, tmp_path: Path):
-        import backend.service.utils.smart_media_detector.magic.magic_detect as _real_module
+        import formatscout.magic.magic_detect as _real_module
 
         real_source = Path(_real_module.__file__)
         copied_module = tmp_path / "magic_detect_import_test.py"
@@ -230,7 +230,7 @@ class TestMalformedTomlAtImportTime:
         confirm the failure above is caused by the malformed content and not
         by some artifact of running magic_detect.py as a standalone copy.
         """
-        import backend.service.utils.smart_media_detector.magic.magic_detect as _real_module
+        import formatscout.magic.magic_detect as _real_module
 
         real_source = Path(_real_module.__file__)
         real_toml = real_source.parent / "magic_signatures.toml"

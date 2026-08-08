@@ -1,8 +1,8 @@
-"""Tests for backend.service.utils.smart_media_detector.directory_detect."""
+"""Tests for formatscout.directory_detect."""
 
 from pathlib import Path
 
-from backend.service.utils.smart_media_detector.tests import smart_media_fixtures as fx
+from formatscout.tests import smart_media_fixtures as fx
 
 
 # ---------------------------------------------------------------------------
@@ -13,12 +13,12 @@ from backend.service.utils.smart_media_detector.tests import smart_media_fixture
 
 class TestDetectFromPe:
     def _call(self, exe_path: Path):
-        from backend.service.utils.smart_media_detector.directory_detect import _detect_from_pe
+        from formatscout.directory_detect import _detect_from_pe
         return _detect_from_pe(exe_path)
 
     def test_is_a_distinct_function_from_exe_detect_detect_exe(self):
-        from backend.service.utils.smart_media_detector.directory_detect import _detect_from_pe
-        from backend.service.utils.smart_media_detector.exe_detect import detect_exe
+        from formatscout.directory_detect import _detect_from_pe
+        from formatscout.exe_detect import detect_exe
         assert _detect_from_pe is not detect_exe
 
     def test_win98_era_from_major_os_version_4(self, tmp_path: Path):
@@ -59,7 +59,7 @@ class TestDetectFromPe:
         duplicated code paths, not delegation, confirm they still agree
         rather than having silently diverged.
         """
-        from backend.service.utils.smart_media_detector.exe_detect import detect_exe
+        from formatscout.exe_detect import detect_exe
 
         pe_path = tmp_path / "GAME.EXE"
         pe_path.write_bytes(fx.build_pe_header(major_os_version=5, subsystem=3))
@@ -79,7 +79,7 @@ class TestDetectFromPe:
 
 class TestParseAutorunExe:
     def _call(self, autorun_path: Path):
-        from backend.service.utils.smart_media_detector.directory_detect import _parse_autorun_exe
+        from formatscout.directory_detect import _parse_autorun_exe
         return _parse_autorun_exe(autorun_path)
 
     def test_parses_open_directive(self, tmp_path: Path):
@@ -111,7 +111,7 @@ class TestParseAutorunExe:
         placed after that boundary must not be found, proof the file is
         genuinely truncated/capped on read, not fully read regardless of size.
         """
-        from backend.service.utils.smart_media_detector.directory_detect import (
+        from formatscout.directory_detect import (
             _POINTER_FILE_READ_CAP_BYTES,
         )
 
@@ -127,7 +127,7 @@ class TestParseAutorunExe:
         inside the cap, on an otherwise large file, is still found, the cap
         truncates the read, it doesn't break normal parsing.
         """
-        from backend.service.utils.smart_media_detector.directory_detect import (
+        from formatscout.directory_detect import (
             _POINTER_FILE_READ_CAP_BYTES,
         )
 

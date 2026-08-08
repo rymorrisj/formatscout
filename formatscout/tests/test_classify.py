@@ -1,12 +1,12 @@
-"""Tests for backend.service.utils.smart_media_detector.classify."""
+"""Tests for formatscout.classify."""
 
 from pathlib import Path
 
-from backend.service.utils.smart_media_detector.tests import smart_media_fixtures as fx
+from formatscout.tests import smart_media_fixtures as fx
 
 
 def _classify(path: Path, title: str, era: str | None, **kwargs):
-    from backend.service.utils.smart_media_detector.classify import classify
+    from formatscout.classify import classify
     return classify(path, title, era, **kwargs)
 
 
