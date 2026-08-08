@@ -133,8 +133,8 @@ def _detect_from_directory(root: Path) -> ScanResult:
             None,
         )
         if cnf_path is not None:
-            from .magic.magic_detect import resolve_ps_generation_from_file
-            era = resolve_ps_generation_from_file(cnf_path)
+            from .magic.magic_detect import _resolve_ps_generation_from_file
+            era = _resolve_ps_generation_from_file(cnf_path)
             if era == "unknown":
                 return ScanResult(
                     title=None, platform=None, era=None, confidence=0.4,

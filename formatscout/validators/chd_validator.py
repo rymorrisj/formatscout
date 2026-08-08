@@ -52,7 +52,7 @@ def extract_embedded_sha1(path: Path) -> str | None:
         return None
 
 
-def detect(path: Path) -> ScanResult:
+def detect_chd_platform(path: Path) -> ScanResult:
     """
     Inspect CHD v5 metadata chain to determine platform.
 

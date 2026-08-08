@@ -37,7 +37,7 @@ flowchart TD
     FileDispatch --> IsoBranch[".iso -&gt; detect_iso()"]
     FileDispatch --> BinBranch[".bin -&gt; Tier 2 magic (0.9) -&gt; Tier 3 PVD (0.7-0.9)<br/>-&gt; bin_validator.resolve_bin_cue() (0.2-0.85)"]
     FileDispatch --> CueBranch[".cue -&gt; detect_cue(): find sibling .bin<br/>(none found -&gt; 0.0 + warning); found -&gt; same<br/>magic -&gt; PVD -&gt; resolve_bin_cue() chain as .bin"]
-    FileDispatch --> ChdBranch[".chd -&gt; chd_validator.detect(): CHD v5 metadata chain<br/>CHGD tag -&gt; dreamcast 0.85; CHTR/CHT2 -&gt; ps1/ps2 by<br/>logical size, 0.3 heuristic; no tag -&gt; 0.0"]
+    FileDispatch --> ChdBranch[".chd -&gt; chd_validator.detect_chd_platform(): CHD v5 metadata chain<br/>CHGD tag -&gt; dreamcast 0.85; CHTR/CHT2 -&gt; ps1/ps2 by<br/>logical size, 0.3 heuristic; no tag -&gt; 0.0"]
     FileDispatch --> ImgBranch[".img -&gt; Tier 5 size fallback:<br/>era=dos 0.35 if &lt;800MB, else 0.0"]
     FileDispatch --> ExeBranch[".exe -&gt; exe_detect.detect_exe(): Tier 3 PE header<br/>MajorOSVersion/Subsystem -&gt; dos 0.65 / win98 0.75 /<br/>winxp 0.75; else 0.0"]
     FileDispatch --> NoSig["no suffix match -&gt; confidence=0.0"]
@@ -56,7 +56,7 @@ flowchart TD
     DirDispatch --> Autorun["Tier 4a: _detect_from_autorun()<br/>AUTORUN.INF OPEN=/RUN= -&gt; pointed .exe's PE header"]
     Autorun -- "era resolved" --> AutoR["era=dos/win98/winxp, 0.65-0.75"]
     Autorun -- "no signal" --> DirHeur["Tier 4b: _detect_from_directory()"]
-    DirHeur -- "root marker files (XPSP/I386, WIN98/95,<br/>SYSTEM.CNF, INSTALL.*)" --> DirR3["era resolved by marker, 0.4-0.8<br/>(SYSTEM.CNF via magic_detect.resolve_ps_generation_from_file)"]
+    DirHeur -- "root marker files (XPSP/I386, WIN98/95,<br/>SYSTEM.CNF, INSTALL.*)" --> DirR3["era resolved by marker, 0.4-0.8<br/>(SYSTEM.CNF via magic_detect._resolve_ps_generation_from_file)"]
     DirHeur -- "depth-2 scan (DOS tools, .WAD,<br/>split archives, .BAT, DOS-only exts)" --> DirR4["era=dos, 0.5-0.6"]
     DirHeur -- "nothing matched" --> DirR5["confidence=0.0"]
 
@@ -369,3 +369,7 @@ We sourced all of our Datfiles from:
 - [Redump](http://redump.org//)
 - [TOSEC](https://www.tosecdev.org/)
 - [No-Intro](https://datomatic.no-intro.org/)
+
+## License
+
+Released under the MIT License, see [LICENSE](LICENSE) for the full text.

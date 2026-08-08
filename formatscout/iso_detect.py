@@ -60,7 +60,7 @@ def detect_cue(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> S
 
 
 def detect_chd(path: Path) -> ScanResult:
-    return chd_validator.detect(path)
+    return chd_validator.detect_chd_platform(path)
 
 
 # ── ISO 9660 PVD ─────────────────────────────────────────────────────────────

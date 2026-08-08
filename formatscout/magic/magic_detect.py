@@ -28,7 +28,7 @@ def _classify_system_cnf(content: str) -> str:
     return "ps2" if "BOOT2" in content else "ps1"
 
 
-def resolve_ps_generation_from_file(cnf_path: Path) -> str:
+def _resolve_ps_generation_from_file(cnf_path: Path) -> str:
     """
     Classify PS1 vs PS2 from an already-extracted SYSTEM.CNF file on disk
     (directory-based items, no CD sector arithmetic needed since the file
