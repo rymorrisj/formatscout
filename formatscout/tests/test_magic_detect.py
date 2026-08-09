@@ -41,6 +41,46 @@ class TestDetectFromMagicContinueVsReturn:
         assert era == "dreamcast"
         assert reason != ""
 
+    def test_pc_bin_cue_image_with_pvd_but_no_system_cnf_is_not_ps1(self, tmp_path: Path):
+        """End-to-end regression for the PS1 misclassification bug.
+
+        A plain PC (non-PlayStation) CD image ripped to BIN/CUE is a real
+        Mode 2 disc, so it carries the generic sector sync pattern at offset 0
+        and a perfectly valid ISO9660 PVD at sector 16. What it does not have
+        is a SYSTEM.CNF entry in its root directory, because it is not a
+        PlayStation title at all.
+
+        The sync pattern is not PlayStation specific, so matching it must never
+        by itself yield a console. With SYSTEM.CNF absent, _resolve_ps_generation
+        returns "unknown", detect_from_magic falls through the remaining .bin
+        signatures (none of which match a blank PC image) and reports no signal.
+
+        The bug this guards against returned "ps1" here, mislabelling every PC
+        BIN/CUE rip as a PlayStation 1 disc.
+        """
+        from formatscout.magic.magic_detect import detect_from_magic
+
+        disc = bytearray(
+            fx.build_ps_disc_bin(boot_line=None, include_system_cnf=False)
+        )
+        # Real rips carry the Mode 2 sync bytes in sector 0; the fixture
+        # builder only populates the PVD and root dir, so add them here.
+        sync = fx.CDROM_SYNC_AMBIGUOUS_BLOB[:12]
+        disc[0:len(sync)] = sync
+
+        path = tmp_path / "pc_game.bin"
+        path.write_bytes(bytes(disc))
+        (tmp_path / "pc_game.cue").write_text(
+            'FILE "pc_game.bin" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n',
+            encoding="utf-8",
+        )
+
+        era, reason = detect_from_magic(path, "bin")
+
+        assert era != "ps1"
+        assert era is None
+        assert reason == ""
+
     def test_pure_ambiguous_sync_with_no_further_match_returns_none(self, tmp_path: Path):
         """Same short-file "unknown" resolution, but with no other signature
         present afterward, confirms the fall-through correctly exhausts the
