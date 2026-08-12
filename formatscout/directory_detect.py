@@ -112,6 +112,13 @@ def _detect_from_directory(root: Path) -> ScanResult:
             reason="cannot list directory",
         )
 
+    # Checked first, same as the PVD root-dir scan in iso_detect.py: an exact
+    # marker filename is a stronger signal than the keyword/marker checks below.
+    if "PS3_DISC.SFB" in entries:
+        return ScanResult(
+            title=None, platform=None, era="ps3", confidence=0.9,
+            reason="directory contains PS3_DISC.SFB, PS3 disc image",
+        )
     if "XPSP" in entries or "I386" in entries:
         return ScanResult(
             title=None, platform=None, era="winxp", confidence=0.6,

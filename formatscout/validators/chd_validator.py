@@ -120,7 +120,7 @@ def detect_chd_platform(path: Path) -> ScanResult:
                     elif logical_bytes:
                         era, size_desc = "ps2", f"{logical_bytes} bytes, DVD-sized"
                     else:
-                        era, size_desc = "ps2", "size unavailable, defaulted to PS2"
+                        era, size_desc = "ps1", "size unavailable, defaulted to PS1"
                     return ScanResult(
                         title=None, platform=None, era=era, confidence=0.3,
                         reason=f"heuristic guess (low confidence): CHD metadata CHTR/CHT2 tag "
