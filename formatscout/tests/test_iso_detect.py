@@ -427,7 +427,7 @@ class TestDetectIso:
         also leaves byte 0x8000 zero so detect_from_pvd() sees no valid PVD
         type code and falls through), nothing at 0x10000 so the XDVDFS magic
         check misses, and a sparse-truncated size past xbox_image's
-        4,000,000,000-byte dvd_rip threshold.
+        4,294,967,296-byte (binary 4 GiB) dvd_rip threshold.
         """
         from formatscout import iso_detect
 
@@ -435,7 +435,7 @@ class TestDetectIso:
         with iso_path.open("wb") as fh:
             fh.seek(0x8001)
             fh.write(b"CD001")
-            fh.truncate(4_100_000_000)
+            fh.truncate(4_400_000_000)
 
         result = iso_detect.detect_iso(iso_path)
         assert result.era == "xbox"

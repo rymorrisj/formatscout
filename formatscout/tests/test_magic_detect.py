@@ -242,19 +242,40 @@ class TestClassifySystemCnf:
 # imported real module in this test process's sys.modules is never touched.
 # ---------------------------------------------------------------------------
 
+def _copy_magic_detect_into_isolated_package(tmp_path: Path) -> tuple[Path, Path]:
+    """Rebuild just enough real package structure for magic_detect.py's
+    "from ..constants import ..." to resolve, so the subprocess import
+    actually reaches TOML parsing instead of failing at that import first.
+
+    Returns (sub_pkg, real_source): the directory the copy lives in, and the
+    path to the real magic_detect.py it was copied from.
+    """
+    import formatscout.magic.magic_detect as _real_module
+
+    real_source = Path(_real_module.__file__)
+    real_constants = real_source.parent.parent / "constants.py"
+
+    pkg_root = tmp_path / "magic_detect_import_test_pkg"
+    sub_pkg = pkg_root / "sub"
+    sub_pkg.mkdir(parents=True)
+
+    (pkg_root / "__init__.py").write_text("", encoding="utf-8")
+    (sub_pkg / "__init__.py").write_text("", encoding="utf-8")
+    shutil.copy(real_constants, pkg_root / "constants.py")
+    shutil.copy(real_source, sub_pkg / "magic_detect_import_test.py")
+
+    return sub_pkg, real_source
+
+
 class TestMalformedTomlAtImportTime:
     def test_malformed_toml_raises_at_import_not_at_call(self, tmp_path: Path):
-        import formatscout.magic.magic_detect as _real_module
+        sub_pkg, _real_source = _copy_magic_detect_into_isolated_package(tmp_path)
 
-        real_source = Path(_real_module.__file__)
-        copied_module = tmp_path / "magic_detect_import_test.py"
-        shutil.copy(real_source, copied_module)
-
-        malformed_toml = tmp_path / "magic_signatures.toml"
+        malformed_toml = sub_pkg / "magic_signatures.toml"
         malformed_toml.write_text("this is [ not valid toml ===\n", encoding="utf-8")
 
         proc = subprocess.run(
-            [sys.executable, "-c", "import magic_detect_import_test"],
+            [sys.executable, "-c", "import magic_detect_import_test_pkg.sub.magic_detect_import_test"],
             cwd=tmp_path,
             capture_output=True,
             text=True,
@@ -265,21 +286,17 @@ class TestMalformedTomlAtImportTime:
         assert "TOMLDecodeError" in proc.stderr
 
     def test_wellformed_toml_sibling_still_imports_cleanly(self, tmp_path: Path):
-        """Control case: the same copy-and-subprocess-import mechanism, but
-        with the real magic_signatures.toml alongside the copied module, to
+        """Control case: the same isolated-package-copy mechanism, but with
+        the real magic_signatures.toml alongside the copied module, to
         confirm the failure above is caused by the malformed content and not
-        by some artifact of running magic_detect.py as a standalone copy.
+        by some artifact of running magic_detect.py as an isolated copy.
         """
-        import formatscout.magic.magic_detect as _real_module
-
-        real_source = Path(_real_module.__file__)
+        sub_pkg, real_source = _copy_magic_detect_into_isolated_package(tmp_path)
         real_toml = real_source.parent / "magic_signatures.toml"
-        copied_module = tmp_path / "magic_detect_import_test.py"
-        shutil.copy(real_source, copied_module)
-        shutil.copy(real_toml, tmp_path / "magic_signatures.toml")
+        shutil.copy(real_toml, sub_pkg / "magic_signatures.toml")
 
         proc = subprocess.run(
-            [sys.executable, "-c", "import magic_detect_import_test"],
+            [sys.executable, "-c", "import magic_detect_import_test_pkg.sub.magic_detect_import_test"],
             cwd=tmp_path,
             capture_output=True,
             text=True,
