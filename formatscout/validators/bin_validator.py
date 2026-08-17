@@ -16,12 +16,9 @@ def resolve_bin_cue(
          Magic takes precedence (0.85); track type used as secondary signal.
       3. If no .cue: return low-confidence result with actionable warning.
 
-    dir_cache: optional, caller-owned {parent_dir: entries} map so a caller
-    scanning many .bin files in the same directory can pass one dict through
-    repeated calls and reuse a single iterdir() per directory instead of
-    rescanning it for every file. None (default) preserves the original
-    per-call iterdir() behavior. Scope this to a single scan/call sequence,
-    never a long-lived cache, to avoid serving a stale directory listing.
+    dir_cache: caller-owned {parent_dir: entries} map so repeated calls in one
+    directory share a single iterdir(). Scope it to one scan sequence, never a
+    long-lived cache, or it will serve a stale directory listing.
     """
     cue_path = _find_cue(bin_path, dir_cache)
 
@@ -40,9 +37,9 @@ def resolve_bin_cue(
 
     track_type = _parse_cue_track_type(cue_path)
 
-    # Magic byte check, reuses the existing signature table, no duplication.
-    # Called here (not just in detector.py) because resolve_bin_cue is also
-    # reachable from .cue entry paths where the .bin magic may not have run yet.
+    # Repeats work: both current callers (detector._detect_file and
+    # iso_detect.detect_cue) already ran detect_from_magic on this .bin and only
+    # reach here after it returned no era.
     era, reason = detect_from_magic(bin_path, "bin")
     if era is not None:
         return ScanResult(
@@ -53,7 +50,6 @@ def resolve_bin_cue(
             reason=f"{reason} (confirmed by {cue_path.name})",
         )
 
-    # No magic match, use track type as secondary signal
     if track_type == "MODE2/2352":
         return ScanResult(
             title=None,
@@ -100,7 +96,6 @@ def resolve_bin_cue(
             warnings=["cannot infer platform from this track type"],
         )
 
-    # cue found but no parseable TRACK line
     return ScanResult(
         title=None,
         platform=None,

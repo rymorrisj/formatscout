@@ -9,7 +9,7 @@ from .iso_detect import detect_iso, detect_cue, detect_chd, detect_from_pvd
 from .exe_detect import detect_exe
 from .directory_detect import detect_directory
 
-_INDEX_PATH = Path(__file__).parent / "hashing" / "hash_index.json"
+_INDEX_PATH = _hash_lookup.default_index_path()
 
 log = logging.getLogger(__name__)
 

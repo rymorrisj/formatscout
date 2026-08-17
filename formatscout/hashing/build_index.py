@@ -28,13 +28,13 @@ def _load_existing(output_path: Path) -> dict:
 def _write_index_atomically(index: dict, output_path: Path) -> None:
     """Serialise *index* to a sibling temp file, then os.replace() it into place.
 
-    Writing directly to output_path meant a crash, a full disk, or an
-    interrupted run left the bundled hash_index.json truncated and no longer
-    valid JSON, which every consumer (hash_lookup._load_cached) then fails to
-    load. os.replace() is atomic within a filesystem, so the index is either
-    the previous complete version or the new complete version, never a partial
-    one. The temp file is created in the destination directory so the rename
-    cannot cross a filesystem boundary.
+    - A crash or full disk during a direct write would leave the index
+      truncated and no longer valid JSON. hash_lookup._load_cached then
+      fails on that.
+    - os.replace() is atomic within a filesystem, so readers see either
+      the old complete index or the new one.
+    - The temp file goes in the destination directory so the rename
+      cannot cross a filesystem boundary.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(

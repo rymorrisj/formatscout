@@ -3,7 +3,7 @@ from pathlib import Path
 from .hashing import hash_lookup as _hash_lookup
 from .result import VerifyResult
 
-_INDEX_PATH = Path(__file__).parent / "hashing" / "hash_index.json"
+_INDEX_PATH = _hash_lookup.default_index_path()
 
 
 def verify(path: Path, expected_sha1: str) -> VerifyResult:

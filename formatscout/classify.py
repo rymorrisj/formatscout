@@ -5,7 +5,7 @@ from .hashing.title_match import fuzzy_title_match
 from .result import ClassifyResult
 from .validators.chd_validator import extract_embedded_sha1
 
-_INDEX_PATH = Path(__file__).parent / "hashing" / "hash_index.json"
+_INDEX_PATH = _hash_lookup.default_index_path()
 _DEFAULT_THRESHOLD = 0.80
 
 

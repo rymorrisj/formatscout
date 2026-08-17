@@ -39,11 +39,13 @@ def _classify_system_cnf(content: str) -> str:
 
 def _resolve_ps_generation_from_file(cnf_path: Path) -> str:
     """
-    Classify PS1 vs PS2 from an already-extracted SYSTEM.CNF file on disk
-    (directory-based items, no CD sector arithmetic needed since the file
-    is directly readable). Same BOOT/BOOT2 marker logic as _resolve_ps_generation.
+    Classify PS1 vs PS2 from an already-extracted SYSTEM.CNF file on disk.
 
-    Returns "unknown" (never a guessed console) if the file cannot be read.
+    Used for directory-based items: the file is directly readable, no CD
+    sector arithmetic needed. Uses the same BOOT/BOOT2 marker logic as
+    _resolve_ps_generation.
+
+    Returns "unknown" if the file cannot be read. Never a guessed console.
     Callers must treat "unknown" as no signal, not as PS1.
     """
     try:
@@ -58,13 +60,14 @@ def _read_mode2_user_data(fh: BinaryIO, start_lba: int, length: int) -> bytes:
     """Read *length* bytes of logical user data starting at *start_lba* from a
     raw Mode 2 image, one physical sector at a time.
 
-    Logical data is not contiguous on a raw CD image: every
-    _MODE2_SECTOR_BYTES-byte sector carries only ISO_LOGICAL_SECTOR_BYTES of
-    payload behind a _MODE2_DATA_OFFSET-byte sync/header. Reading straight
-    through, which this code used to do, splices the next sector's sync bytes
-    into the middle of the buffer and garbles every directory record past the
-    first sector. Callers must cap *length* themselves, see
-    ROOT_DIR_READ_CAP_BYTES.
+    Logical data is not contiguous on a raw CD image:
+    - Each _MODE2_SECTOR_BYTES-byte sector carries only
+      ISO_LOGICAL_SECTOR_BYTES of payload, behind a _MODE2_DATA_OFFSET-byte
+      sync/header.
+    - A straight-through read would splice sync bytes into the buffer and
+      garble every directory record past the first sector.
+
+    Callers must cap *length* themselves. See ROOT_DIR_READ_CAP_BYTES.
     """
     chunks: list[bytes] = []
     remaining = length
@@ -83,10 +86,12 @@ def _read_mode2_user_data(fh: BinaryIO, start_lba: int, length: int) -> bytes:
 def _resolve_ps_generation(path: Path) -> str:
     """Classify PS1 vs PS2 from a raw CD-ROM sector read.
 
-    Returns "unknown" (never a guessed console) whenever SYSTEM.CNF cannot be
-    located or read. The sync pattern that gates this call is a generic
-    Mode 2 CD-ROM marker, not proof the disc is a PlayStation title at all,
-    so callers must treat "unknown" as no signal rather than default to PS1.
+    Returns "unknown" whenever SYSTEM.CNF cannot be located or read. Never
+    a guessed console.
+
+    The sync pattern that gates this call is a generic Mode 2 CD-ROM
+    marker. It is not proof the disc is a PlayStation title. Callers must
+    treat "unknown" as no signal, not default to PS1.
     """
     try:
         with path.open("rb") as fh:
@@ -158,14 +163,10 @@ def detect_from_magic(path: Path, extension: str) -> tuple[str | None, str]:
                             return "ps2", "CD-ROM sector sync matched; SYSTEM.CNF BOOT2 key indicates PS2"
                         if resolved == "ps1":
                             return "ps1", "CD-ROM sector sync matched; SYSTEM.CNF BOOT key indicates PS1"
-                        # resolved == "unknown": sync pattern alone doesn't prove
-                        # PS1/PS2 (it's a generic Mode 2 CD-ROM marker) and
-                        # SYSTEM.CNF couldn't confirm which, so stop treating this
-                        # signature as a match and keep evaluating the rest.
-                        # Returning here instead would abandon every later
-                        # signature that also applies to this extension, which for
-                        # .bin means the Dreamcast IP.BIN magic at 0x10 plus the
-                        # N64 and NES entries never get tested at all.
+                        # "unknown": the sync pattern is a generic Mode 2 marker,
+                        # not a match. continue, not return: a later .bin
+                        # signature (Dreamcast, N64, NES) still needs a chance
+                        # to match.
                         continue
                     return sig["era"], sig["reason"]
 

@@ -191,6 +191,12 @@ DAT files are third-party, untrusted input. `dat_parser.parse_dat()` rejects any
 - Size thresholds use different units by design. The Xbox DVD-rip/ISO-fallback boundary is binary 4 GiB. The PS1/PS2 boundary in `detect_from_pvd()` is decimal 4.7GB, matching how disc capacities are usually quoted.
 - `requires_extraction` is only set by the Xbox DVD-rip path today. Callers run their own conversion tooling, such as extract-xiso. This package only detects the need.
 - `hash_index.json` (~88MB) ships inside the package directory today. No decision yet on in-repo vs. release asset vs. separate data distribution long-term.
+- `hash_index.json` is not bundled in the installed distribution. It is downloaded once on first hash lookup, verified against a hardcoded sha256, and cached under `~/.formatscout/`. That first run requires network access; there is no offline fallback.
+
+## Backlog
+
+- Split `hash_index.json` into a resolvable-era index and a full/PC-compatible-completeness index, published as separate release assets, so consumers can choose which one to fetch. Not built yet, just planned.
+- Version or update checking for the cached `hash_index.json` is not implemented yet. It is only fetched when the local cache is missing, an existing cached copy is never re-checked for updates.
 
 ## Testing
 

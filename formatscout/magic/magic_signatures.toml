@@ -15,15 +15,14 @@
 # Community contributions welcome via pull request.
 
 # ── CD-ROM Mode 2 sync pattern (PS1/PS2-ambiguous) ────────────────────────────
-# This sync pattern is a generic Mode 2 CD-ROM sector marker, not a
-# PlayStation-specific signature; it does not by itself prove the disc is a
-# PS1 or PS2 title. PS2 CD-based games share it with PS1; DVD-based PS2 games
-# do not have it at all (use PVD + SYSTEM.CNF BOOT2 key instead).
-# era is intentionally not "ps1" or "ps2" here: matching this signature only
-# means "run SYSTEM.CNF BOOT/BOOT2 resolution", never a console assumption.
-# The PS1/PS2 distinction for BIN files is resolved in _resolve_ps_generation
-# after magic match; if SYSTEM.CNF cannot be read, detection must fall through
-# to the next tier rather than default to either console.
+# A generic Mode 2 CD-ROM sector marker, not PlayStation-specific.
+# - PS2 CD-based games share it with PS1.
+# - DVD-based PS2 games lack it entirely. Those are resolved by PVD plus
+#   the SYSTEM.CNF BOOT2 key.
+#
+# era is intentionally neither "ps1" nor "ps2". A match here only means
+# "run _resolve_ps_generation". If SYSTEM.CNF cannot be read, detection
+# must fall through rather than default to either console.
 
 [[signatures]]
 era = "cdrom_sync_ambiguous"
@@ -81,4 +80,3 @@ note = "Standard iNES format used by all major NES ROM dumps."
 
 # ── DOS / PC CD-ROM ───────────────────────────────────────────────────────────
 # No reliable magic number for generic DOS ISOs, use PVD publisher/volume label instead.
-# Size-based DOS fallback removed; ambiguous cases return no signal.

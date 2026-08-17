@@ -35,7 +35,8 @@ def extract_embedded_sha1(path: Path) -> str | None:
 
     No hunk decompression, this only reads header bytes. Returns None on any
     read error, on a header too short to contain the field, or on an
-    all-zero field (unset, some chdman versions omit it for non-CD types).
+    all-zero field. An all-zero field means unset: some chdman versions
+    omit it for non-CD types.
     """
     try:
         with path.open("rb") as fh:
@@ -108,13 +109,11 @@ def detect_chd_platform(path: Path) -> ScanResult:
                     )
 
                 if tag in (_META_CHTR, _META_CHT2):
-                    # CHTR/CHT2 only means "standard CD/DVD track", it does NOT
-                    # distinguish PS1 from PS2 (both use this tag). A real fix
-                    # requires decompressing the CHD to inspect SYSTEM.CNF, which
-                    # is out of scope (separate backlog item). As a heuristic,
-                    # use the header's logical (uncompressed) size to guess
-                    # CD-sized (PS1) vs DVD-sized (PS2), still not authoritative
-                    # like the CHGD/hash-index/magic-byte paths.
+                    # CHTR/CHT2 only means "standard CD/DVD track". It does NOT
+                    # distinguish PS1 from PS2; both use this tag.
+                    # Deciding properly needs SYSTEM.CNF, which means
+                    # decompressing hunks. Fall back to logical size as a
+                    # non-authoritative guess instead.
                     if logical_bytes and logical_bytes <= _CD_SIZE_THRESHOLD:
                         era, size_desc = "ps1", f"{logical_bytes} bytes, CD-sized"
                     elif logical_bytes:

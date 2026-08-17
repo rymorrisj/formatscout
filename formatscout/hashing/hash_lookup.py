@@ -1,5 +1,8 @@
 import hashlib
 import json
+import os
+import tempfile
+import urllib.request
 import zlib
 from pathlib import Path
 
@@ -8,9 +11,55 @@ from ..validators.chd_validator import extract_embedded_sha1
 
 _CHUNK = 65536
 
+# hash_index.json is not shipped in the built distribution (it's ~88MB), so
+# it is cached locally on first use instead. See _fetch_default_index().
+_CACHE_DIR = Path.home() / ".formatscout"
+_DEFAULT_INDEX_PATH = _CACHE_DIR / "hash_index.json"
+
+_INDEX_DOWNLOAD_URL = "https://github.com/rymorrisj/formatscout/releases/download/full_hash_v0.1.0/hash_index.json"
+_INDEX_SHA256 = "17fa892b072b4d942ef920eef8bdee034e8e0acdf508ab484f1afefe992dfce2"
+
 # Cached per index_path: (mtime, sha1_index, md5_index, crc32_index). Keyed by mtime
 # so a rebuilt hash_index.json (via build_index.py) is picked up without a restart.
 _index_cache: dict[Path, tuple[float, dict, dict, dict]] = {}
+
+
+def default_index_path() -> Path:
+    """Local cache location for hash_index.json, fetched here on first use."""
+    return _DEFAULT_INDEX_PATH
+
+
+def _fetch_default_index() -> None:
+    """Download, sha256-verify, and cache hash_index.json.
+
+    No offline fallback: a failed download or a hash mismatch raises and
+    propagates to the caller rather than degrading to an empty index.
+    """
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    with urllib.request.urlopen(_INDEX_DOWNLOAD_URL, timeout=30) as response:
+        data = response.read()
+
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != _INDEX_SHA256:
+        raise ValueError(
+            f"hash_index.json download failed sha256 verification: "
+            f"expected {_INDEX_SHA256}, got {digest}"
+        )
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=_CACHE_DIR, prefix=f".{_DEFAULT_INDEX_PATH.name}.", suffix=".tmp",
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, _DEFAULT_INDEX_PATH)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def hash_file(path: Path) -> HashFileResult:
@@ -36,26 +85,26 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
 
     Three descending tiers, each with its own confidence:
 
-      sha1  (1.0)  cryptographic digest, treat a hit as identification.
-      md5   (0.85) broken against deliberate collisions, but a chance
+      sha1  (1.0)  Cryptographic digest. Treat a hit as identification.
+      md5   (0.85) Broken against deliberate collisions. A chance
                    collision on real dump data is not a practical concern.
-      crc32 (0.75) NOT a cryptographic digest. CRC32 is a 32-bit error-
-                   detection checksum: collisions exist by the pigeonhole
-                   principle at ~2**32 inputs and can be constructed
-                   trivially and on purpose. A crc32 hit is a hint that the
-                   file is probably the indexed title, never proof of it, and
-                   0.75 must not be read as strong identification. Do not use
-                   this tier to authenticate a file or to make a decision that
-                   is unsafe if the identification is wrong.
+      crc32 (0.75) NOT a cryptographic digest. A 32-bit error-detection
+                   checksum, not a hash: collisions exist by the
+                   pigeonhole principle at ~2**32 inputs and can be
+                   constructed on purpose.
+
+                   A hit is a hint the file is probably the indexed
+                   title, never proof. Do not use this tier to
+                   authenticate a file or to make an unsafe decision.
     """
     index, md5_index, crc32_index = _load_cached(index_path)
     if not index:
         return None
 
-    # CHD containers never match on raw file bytes, chdman compresses and wraps
-    # the original track data, so hashing the .chd file itself cannot equal a
-    # Redump hash of the original dump. Use the header's embedded rawsha1 field
-    # (the hash of the raw, uncompressed data) instead.
+    # CHD containers never match on raw file bytes. chdman compresses and
+    # wraps the original track data, so hashing the .chd file itself cannot
+    # equal a Redump hash of the original dump. Use the header's embedded
+    # rawsha1 field instead (the raw, uncompressed hash).
     if path.suffix.lower() == ".chd":
         embedded_sha1 = extract_embedded_sha1(path)
         if embedded_sha1 is None:
@@ -93,8 +142,6 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
             reason=f"md5 match: {hashes.md5}",
         )
 
-    # Weakest tier, see the confidence table in this function's docstring:
-    # crc32 is a non-cryptographic checksum and a hit is a hint, not proof.
     entry = crc32_index.get(hashes.crc32)
     if entry is not None:
         return ScanResult(
@@ -110,10 +157,13 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
 
 def _load_cached(index_path: Path) -> tuple[dict, dict, dict]:
     if not index_path.exists():
-        raise FileNotFoundError(
-            f"Hash index not found at {index_path}. "
-            "Run build_index.py to generate it from your DAT files."
-        )
+        if index_path == _DEFAULT_INDEX_PATH:
+            _fetch_default_index()
+        else:
+            raise FileNotFoundError(
+                f"Hash index not found at {index_path}. "
+                "Run build_index.py to generate it from your DAT files."
+            )
 
     mtime = index_path.stat().st_mtime
     cached = _index_cache.get(index_path)

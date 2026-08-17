@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,24 @@ name = "formatscout"
 version = "0.1.0"
 description = "Multi-tier disk image and directory format/platform/era detector (hash, magic-byte, structural, directory heuristics, extension fallback), including Xbox xISO/DVD-rip identification as one of its ISO-tier signals."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Ryan Morris" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Games/Entertainment",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Archiving",
+    "Topic :: System :: Emulators",
+]
 # formatscout/magic/magic_detect.py reads magic_signatures.toml via the
 # stdlib tomllib module, added in Python 3.11 (not 3.10, tomllib does not
 # exist there). Every import across formatscout/ (excluding tests/)
@@ -20,13 +38,18 @@ dependencies = []
 # tests/ imports the package by its own name throughout (`from
 # formatscout.tests import smart_media_fixtures as fx`, plus per-test local
 # imports of the modules under test). No pre-extraction monorepo import paths
-# remain anywhere under the package. pytest is the only test-time dependency
-# and is deliberately not declared here, there is no optional-dependency
-# group yet.
+# remain anywhere under the package.
 #
 # formatscout.tests is intentionally absent from the packages list below:
 # the suite ships in the repository but is not installed with the
 # distribution. Run it from a source checkout (`pytest formatscout/tests/`).
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/rymorrisj/formatscout"
+Repository = "https://github.com/rymorrisj/formatscout"
 
 [tool.setuptools]
 packages = [
@@ -38,5 +61,5 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
-"formatscout.hashing" = ["hash_index.json"]
+"formatscout" = ["py.typed"]
 "formatscout.magic" = ["magic_signatures.toml"]

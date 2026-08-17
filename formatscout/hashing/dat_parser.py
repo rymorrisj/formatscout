@@ -5,29 +5,28 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Redump/No-Intro DAT <header><name> platform strings, checked in order
-# (most-specific first) so "PlayStation 3" is matched before "PlayStation 2"
-# before the bare "PlayStation" substring, "Xbox 360" is matched before the
-# bare "Xbox" substring, and "Super Nintendo Entertainment System" is matched
-# before the "Nintendo Entertainment System" substring it contains.
+# (most-specific first):
+# - "PlayStation 3" before "PlayStation 2" before the bare "PlayStation"
+#   substring.
+# - "Xbox 360" before the bare "Xbox" substring.
+# - "Super Nintendo Entertainment System" before the "Nintendo
+#   Entertainment System" substring it contains.
 #
-# The bare "playstation" and "xbox" markers are still substring matches, so
-# any future platform string that also contains one of them ("PlayStation 4",
-# "PlayStation 5", "PlayStation Portable", "PlayStation Vita", "Xbox One",
-# "Xbox Series") and has no more-specific marker of its own ahead of it in
-# this list will silently fall into ps1/xbox the same way PS3 and Xbox 360
-# did before this fix. None of those platforms are in this package's era
-# vocabulary yet (the era slugs produced below are the whole of it), so do
-# not add a marker for one without deciding on its era value first.
+# The bare "playstation" and "xbox" markers are still substring matches.
+# A future platform string containing one of them ("PlayStation 4/5",
+# "PlayStation Portable/Vita", "Xbox One/Series") with no more-specific
+# marker ahead of it in this list will silently fall into ps1/xbox, the
+# same way PS3 and Xbox 360 did before this fix. None of those platforms
+# are in this package's era vocabulary yet. Do not add a marker for one
+# without deciding on its era value first.
 #
-# These entries are confirmed against real Redump DAT header text ingested
-# into hash_index.json ("Sony - PlayStation", "Sony - PlayStation 2",
-# "Sony - PlayStation 3", "Microsoft - Xbox", "Microsoft - Xbox 360",
-# presumably "Sega - Dreamcast" following the same pattern).
+# Confirmed against real Redump DAT header text in hash_index.json:
+# "Sony - PlayStation", "Sony - PlayStation 2", "Sony - PlayStation 3",
+# "Microsoft - Xbox", "Microsoft - Xbox 360", presumably "Sega -
+# Dreamcast" following the same pattern.
 #
-# The NES/SNES/N64 entries below follow No-Intro's standard, well-established
-# "<Manufacturer> - <full system name>" naming convention. They have not been
-# verified against an actually downloaded No-Intro DAT in this session, but
-# the convention itself is well known and consistent, so confidence is high.
+# The NES/SNES/N64 entries follow No-Intro's "<Manufacturer> - <full
+# system name>" convention but are unverified against a real No-Intro DAT.
 _ERA_MARKERS: list[tuple[str, str]] = [
     ("playstation 3", "ps3"),
     ("playstation 2", "ps2"),
@@ -40,18 +39,15 @@ _ERA_MARKERS: list[tuple[str, str]] = [
     ("nintendo 64", "n64"),
 ]
 
-# Deliberately no "ibm pc compatible" entry. Redump ships one PC disc DAT
-# category that covers DOS and Windows 95/98/XP era CD software together, a
-# platform-name string alone cannot tell those eras apart the way it can for
-# the console entries above. Mapping it to any single era, "dos" included,
-# would let a confirmed, confidence=1.0 hash match silently mislabel a
-# Windows-era title, the same wrong-answer-with-false-confidence failure
-# shape as the PS1 sector-sync bug this project already had to fix once. A
-# PC DAT should parse cleanly and fall through to era=None here, the same
-# safe default any other unmapped platform name already gets, until a real
-# per-title resolution strategy (inspecting individual DAT game entries for
-# sub-platform hints, not just the shared header name) is built. Do not
-# reintroduce a blanket mapping for this platform.
+# Deliberately no "ibm pc compatible" entry.
+# - Redump's single PC disc category covers DOS and Windows 95/98/XP
+#   together. The header name alone cannot separate those eras.
+# - Any blanket mapping, "dos" included, would let a confidence=1.0 hash
+#   match silently mislabel a Windows-era title.
+# - Falling through to era=None is the safe default until a per-title
+#   strategy exists (inspecting individual game entries, not the shared
+#   header name).
+# Do not reintroduce a blanket mapping for this platform.
 
 
 def _resolve_era_from_platform(platform: str | None) -> str | None:
@@ -67,18 +63,26 @@ def _resolve_era_from_platform(platform: str | None) -> str | None:
 def _reject_internal_entities(raw: bytes, path: Path) -> None:
     """Refuse a DAT whose DOCTYPE declares entities in its internal subset.
 
-    xml.etree.ElementTree expands internal entity declarations, which makes it
-    vulnerable to entity-expansion denial of service (billion laughs, quadratic
-    blowup) on untrusted input, and DAT files are third-party downloads. The
-    usual mitigation, defusedxml, is a new runtime dependency this package does
-    not have, and this Python's C XMLParser exposes no expat handle to install
-    entity handlers on, so the declaration is rejected up front instead.
+    xml.etree.ElementTree expands internal entity declarations. That makes
+    it vulnerable to entity-expansion denial of service (billion laughs,
+    quadratic blowup) on untrusted input, and DAT files are third-party
+    downloads.
 
-    Only the internal subset (the bracketed section of a DOCTYPE) is inspected,
-    since that is the sole place an entity can be declared: external DTDs are
-    never fetched by ElementTree's default parser, so the external DOCTYPE that
-    real Logiqx/Redump/No-Intro DATs carry stays perfectly valid, and a game
-    title that merely contains the text "<!ENTITY" cannot trip this.
+    Two reasons this is rejected up front instead of mitigated:
+    - defusedxml, the usual mitigation, is a new runtime dependency this
+      package does not have.
+    - This Python's C XMLParser exposes no expat handle to install entity
+      handlers on.
+
+    Only the internal subset (the bracketed section of a DOCTYPE) is
+    inspected. That is the sole place an entity can be declared: external
+    DTDs are never fetched by ElementTree's default parser, so the
+    external DOCTYPE real Logiqx/Redump/No-Intro DATs carry stays valid.
+
+    The bracket scan is textual, not a real DTD parse. A "]" appearing
+    before the internal subset (inside a quoted SYSTEM identifier, say)
+    ends the inspected window early and lets a later entity declaration
+    through.
     """
     doctype = raw.find(b"<!DOCTYPE")
     if doctype == -1:
@@ -106,7 +110,7 @@ def parse_dat(path: Path) -> list[dict]:
     except ET.ParseError as exc:
         raise ValueError(f"Failed to parse DAT file {path}: {exc}") from exc
 
-    # Extract platform hint from <header><name> if present (TOSEC and some Redump DATs)
+    # Platform hint lives in <header><name> on TOSEC and some Redump DATs only.
     platform: str | None = None
     header = root.find("header")
     if header is not None:
@@ -124,7 +128,8 @@ def parse_dat(path: Path) -> list[dict]:
             try:
                 sha1 = (rom.get("sha1") or "").lower().strip()
                 md5 = (rom.get("md5") or "").lower().strip()
-                # Redump uses "crc", TOSEC may use "crc" as well
+                # Logiqx/Redump/TOSEC spell the attribute "crc"; "crc32" is a
+                # tolerated variant seen in some hand-rolled DATs.
                 crc32 = (rom.get("crc") or rom.get("crc32") or "").lower().strip()
 
                 if not sha1 and not md5 and not crc32:
