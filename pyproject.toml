@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "formatscout"
-version = "0.1.0"
+version = "0.1.1"
 description = "Multi-tier disk image and directory format/platform/era detector (hash, magic-byte, structural, directory heuristics, extension fallback), including Xbox xISO/DVD-rip identification as one of its ISO-tier signals."
 readme = "README.md"
 license = "MIT"
@@ -44,11 +44,15 @@ dependencies = []
 # distribution. Run it from a source checkout (`pytest formatscout/tests/`).
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["pytest", "pytest-cov"]
 
 [project.urls]
 Homepage = "https://github.com/rymorrisj/formatscout"
 Repository = "https://github.com/rymorrisj/formatscout"
+
+[tool.coverage.run]
+source = ["formatscout"]
+omit = ["formatscout/tests/*"]
 
 [tool.setuptools]
 packages = [

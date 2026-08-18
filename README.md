@@ -3,6 +3,9 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Dependencies: Zero](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/formatscout.svg)](https://pypi.org/project/formatscout/)
+[![CI](https://img.shields.io/github/actions/workflow/status/rymorrisj/formatscout/ci.yml)](https://github.com/rymorrisj/formatscout/actions)
+[![Coverage](https://img.shields.io/badge/coverage-89%25-brightgreen.svg)]()
 
 
 Multi-tier format-identification for disk images and directory trees. Pure Python 3.11+ stdlib. Zero third-party runtime dependencies.
@@ -13,7 +16,11 @@ Originally built for [Peach 1UP](https://github.com/rymorrisj/peach_1up), an emu
 
 ## Install
 
-Not published to PyPI (yet). Install from source:
+```bash
+pip install formatscout
+```
+
+Or from source, for contributors:
 
 ```bash
 git clone https://github.com/rymorrisj/formatscout.git

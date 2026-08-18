@@ -7,7 +7,7 @@ from .verify import verify
 
 # Kept in sync manually with [project].version in pyproject.toml, no dynamic
 # version tooling.
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "detect", "ScanResult", "verify", "VerifyResult", "classify", "ClassifyResult",
