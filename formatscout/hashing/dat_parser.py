@@ -2,6 +2,8 @@ import logging
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from ..constants import DAT_FILE_READ_CAP_BYTES
+
 logger = logging.getLogger(__name__)
 
 # Redump/No-Intro DAT <header><name> platform strings, checked in order
@@ -101,6 +103,13 @@ def _reject_internal_entities(raw: bytes, path: Path) -> None:
 def parse_dat(path: Path) -> list[dict]:
     source = path.stem
     records: list[dict] = []
+
+    size = path.stat().st_size
+    if size > DAT_FILE_READ_CAP_BYTES:
+        raise ValueError(
+            f"Failed to parse DAT file {path}: file is {size} bytes, exceeding the "
+            f"{DAT_FILE_READ_CAP_BYTES}-byte cap for DAT files"
+        )
 
     raw = path.read_bytes()
     _reject_internal_entities(raw, path)

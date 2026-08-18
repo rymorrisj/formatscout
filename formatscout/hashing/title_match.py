@@ -22,7 +22,13 @@ def _normalize_title(title: str) -> str:
 
 
 def _titles_for_era(era: str, index_path: Path) -> list[tuple[str, str]]:
-    index, _md5_index, _crc32_index = _hash_lookup._load_cached(index_path)
+    try:
+        index, _md5_index, _crc32_index = _hash_lookup._load_cached(index_path)
+    except FileNotFoundError:
+        # No index present. Degrade to no candidates so fuzzy_title_match()
+        # returns None, the same degrade-to-empty behavior classify() already
+        # applies when _load_cached fails for the sha1/md5/crc32 tiers.
+        return []
     mtime = index_path.stat().st_mtime
     key = (index_path, era)
     cached = _title_cache.get(key)

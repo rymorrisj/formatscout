@@ -33,3 +33,18 @@ ISO_LOGICAL_SECTOR_BYTES = 2048
 # Distinct from the 4.7 GB DVD-5 boundary in iso_detect.detect_from_pvd(), which
 # is deliberately decimal because optical-disc capacities are quoted that way.
 DVD_SIZE_THRESHOLD_BYTES = 4 * 1024 ** 3
+
+# Redump/No-Intro/TOSEC DAT files are XML text, typically a few MB to tens of
+# MB even for large platforms. dat_parser.parse_dat() reads the whole file
+# into memory before handing it to ET.fromstring(), so an untrusted or
+# corrupt DAT far past that size would be read whole just to fail parsing.
+# Cap it, mirroring the POINTER_FILE_READ_CAP_BYTES/ROOT_DIR_READ_CAP_BYTES
+# pattern above.
+DAT_FILE_READ_CAP_BYTES = 500 * 1024 * 1024
+
+# Mirrors chd_validator._MAX_METADATA_ENTRIES: caps the depth-2 directory scan
+# in directory_detect._detect_from_directory() so a directory tree with an
+# enormous number of subdirectories/children cannot make the scan accumulate
+# names unboundedly. This is a detection heuristic, not a hard requirement, so
+# the scan stops early rather than raising.
+DIRECTORY_DEPTH2_SCAN_CAP_ENTRIES = 4096

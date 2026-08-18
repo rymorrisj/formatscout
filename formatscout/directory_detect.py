@@ -1,7 +1,7 @@
 import struct
 from pathlib import Path
 
-from .constants import POINTER_FILE_READ_CAP_BYTES
+from .constants import DIRECTORY_DEPTH2_SCAN_CAP_ENTRIES, POINTER_FILE_READ_CAP_BYTES
 from .result import ScanResult
 
 _WINDOWS_MARKERS = frozenset({"WINDOWS", "WIN", "SYSTEM", "SYSTEM32", "PROGRAM FILES", "PROGRA~1"})
@@ -167,9 +167,13 @@ def _detect_from_directory(root: Path) -> ScanResult:
     depth2_names: set[str] = set(entries)
     try:
         for entry in root.iterdir():
+            if len(depth2_names) >= DIRECTORY_DEPTH2_SCAN_CAP_ENTRIES:
+                break
             if entry.is_dir():
                 try:
                     for sub in entry.iterdir():
+                        if len(depth2_names) >= DIRECTORY_DEPTH2_SCAN_CAP_ENTRIES:
+                            break
                         depth2_names.add(sub.name.upper())
                 except OSError:
                     pass

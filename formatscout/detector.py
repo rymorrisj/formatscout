@@ -73,28 +73,19 @@ def _detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> Scan
             reason="path does not exist",
         )
 
-    # Tier 1: hash lookup, highest confidence, return immediately on match
-    try:
-        result = _hash_lookup.lookup(path, _INDEX_PATH)
-        if result is not None and result.era is not None:
-            result.requires_install = _compute_requires_install(path, result.era)
-            return result
-    except Exception as exc:
-        if path.is_dir():
-            # A directory reaching hash_file()'s path.open("rb") always fails
-            # (PermissionError on Windows, IsADirectoryError on POSIX), this is
-            # a caller bug, some upstream step should have resolved *path* to
-            # its actual hashable media file before detection ran, not this
-            # function's job to do. The traceback adds nothing actionable here.
-            log.warning(
-                "Hash lookup received a directory instead of a resolved media "
-                "file for '%s': %s. The caller did not resolve this path to "
-                "its actual launchable file before detection.",
-                path, exc,
-            )
-        else:
+    # Tier 1: hash lookup, highest confidence, return immediately on match.
+    # Directories are a first-class input (Tier 4), not a hashable file, so
+    # skip this tier for them entirely rather than reaching hash_file()'s
+    # path.open("rb") only to fail.
+    if path.is_file():
+        try:
+            result = _hash_lookup.lookup(path, _INDEX_PATH)
+            if result is not None and result.era is not None:
+                result.requires_install = _compute_requires_install(path, result.era)
+                return result
+        except Exception as exc:
             log.warning("Hash lookup failed for '%s': %s", path, exc, exc_info=True)
-        # empty or missing index, continue to signal detection
+            # empty or missing index, continue to signal detection
 
     if path.is_file():
         result = _detect_file(path, dir_cache)
