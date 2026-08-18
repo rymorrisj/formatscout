@@ -1,8 +1,9 @@
-import struct
 from pathlib import Path
 
-from .constants import DIRECTORY_DEPTH2_SCAN_CAP_ENTRIES, POINTER_FILE_READ_CAP_BYTES
-from .result import ScanResult
+from .constants import DIRECTORY_DEPTH2_SCAN_CAP_ENTRIES
+from .exe_detect import _classify_pe_header
+from .result import ScanResult, null_scan_result
+from .utils.pointer_file import read_capped_lines
 
 _WINDOWS_MARKERS = frozenset({"WINDOWS", "WIN", "SYSTEM", "SYSTEM32", "PROGRAM FILES", "PROGRA~1"})
 _DOS_TOOLS = frozenset({"DEICE.EXE", "PKUNZIP.EXE", "PKUNZIP.COM", "LZMA.EXE"})
@@ -16,7 +17,7 @@ def detect_directory(path: Path) -> ScanResult:
 
 
 def _detect_from_autorun(root: Path) -> ScanResult:
-    _null = ScanResult(title=None, platform=None, era=None, confidence=0.0, reason="")
+    _null = null_scan_result()
     try:
         autorun = None
         for name in ("AUTORUN.INF", "Autorun.inf", "autorun.inf"):
@@ -42,9 +43,7 @@ def _detect_from_autorun(root: Path) -> ScanResult:
 
 def _parse_autorun_exe(autorun: Path) -> str | None:
     try:
-        with autorun.open("rb") as fh:
-            raw = fh.read(POINTER_FILE_READ_CAP_BYTES)
-        for line in raw.decode("utf-8", errors="replace").splitlines():
+        for line in read_capped_lines(autorun):
             stripped = line.strip()
             if stripped.upper().startswith(("OPEN=", "RUN=")):
                 value = stripped.split("=", 1)[1].strip().strip('"')
@@ -56,46 +55,34 @@ def _parse_autorun_exe(autorun: Path) -> str | None:
 
 
 def _detect_from_pe(exe_path: Path) -> ScanResult:
-    _null = ScanResult(title=None, platform=None, era=None, confidence=0.0, reason="")
+    """Distinct from exe_detect.detect_exe(): this reports AUTORUN.INF-specific
+    reason text and is reached from a directory scan rather than a bare .exe
+    path, but the underlying PE-header classification is shared, see
+    exe_detect._classify_pe_header().
+    """
     try:
         with exe_path.open("rb") as fh:
             header = fh.read(4096)
 
-        if len(header) < 2 or header[:2] != b"MZ":
-            return _null
-        if len(header) < 0x40:
+        era, confidence, branch, major_os = _classify_pe_header(header)
+
+        if branch == "too_short_mz":
             return ScanResult(
-                title=None, platform=None, era="dos", confidence=0.65,
+                title=None, platform=None, era=era, confidence=confidence,
                 reason="AUTORUN.INF points to MZ-only (DOS) executable",
             )
-
-        pe_offset = struct.unpack_from("<I", header, 0x3C)[0]
-        if pe_offset + 96 > len(header):
-            return _null
-        if header[pe_offset: pe_offset + 4] != b"PE\x00\x00":
+        if branch == "no_pe_signature":
             return ScanResult(
-                title=None, platform=None, era="dos", confidence=0.65,
+                title=None, platform=None, era=era, confidence=confidence,
                 reason="AUTORUN.INF exe has MZ header but no PE signature, likely DOS",
             )
-
-        # Optional header offset 68 = Subsystem; offset 40 = MajorOperatingSystemVersion
-        subsystem = struct.unpack_from("<H", header, pe_offset + 92)[0]
-        major_os = struct.unpack_from("<H", header, pe_offset + 64)[0]
-
-        if subsystem not in (2, 3):
-            return _null
-
-        if major_os >= 5:
+        if branch == "era_match":
+            label = "(Windows NT 5+)" if era == "winxp" else "(Windows 9x era)"
             return ScanResult(
-                title=None, platform=None, era="winxp", confidence=0.75,
-                reason=f"PE MajorOperatingSystemVersion={major_os} (Windows NT 5+)",
+                title=None, platform=None, era=era, confidence=confidence,
+                reason=f"PE MajorOperatingSystemVersion={major_os} {label}",
             )
-        if major_os == 4:
-            return ScanResult(
-                title=None, platform=None, era="win98", confidence=0.75,
-                reason=f"PE MajorOperatingSystemVersion={major_os} (Windows 9x era)",
-            )
-        return _null
+        return null_scan_result()
     except Exception as exc:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
@@ -140,8 +127,8 @@ def _detect_from_directory(root: Path) -> ScanResult:
             None,
         )
         if cnf_path is not None:
-            from .magic.magic_detect import _resolve_ps_generation_from_file
-            era = _resolve_ps_generation_from_file(cnf_path)
+            from .magic.magic_detect import resolve_ps_generation_from_file
+            era = resolve_ps_generation_from_file(cnf_path)
             if era == "unknown":
                 return ScanResult(
                     title=None, platform=None, era=None, confidence=0.4,

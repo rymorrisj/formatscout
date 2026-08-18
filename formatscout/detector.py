@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 
+from .constants import CD_SIZE_THRESHOLD_BYTES
 from .hashing import hash_lookup as _hash_lookup
 from .magic.magic_detect import detect_from_magic
 from .result import ScanResult
@@ -179,7 +180,7 @@ def _detect_file(path: Path, dir_cache: dict[Path, list[Path]] | None = None) ->
 
     if suffix == ".img":
         try:
-            if path.stat().st_size < 800 * 1024 * 1024:
+            if path.stat().st_size < CD_SIZE_THRESHOLD_BYTES:
                 return ScanResult(
                     title=None, platform=None, era="dos", confidence=0.35,
                     reason="file extension .img under 800 MB suggests DOS-era image",

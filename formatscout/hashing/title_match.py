@@ -11,7 +11,7 @@ from . import hash_lookup as _hash_lookup
 _BRACKETED_RE = re.compile(r"[\(\[][^\)\]]*[\)\]]")
 
 # Cached per (index_path, era): (mtime, [(normalized_title, original_title), ...]).
-# Reuses hash_lookup._load_cached's own mtime-keyed cache for the raw index,
+# Reuses hash_lookup.load_index's own mtime-keyed cache for the raw index,
 # this only adds the era-filtered, normalized, de-duplicated title list on top.
 _title_cache: dict[tuple[Path, str], tuple[float, list[tuple[str, str]]]] = {}
 
@@ -23,11 +23,11 @@ def _normalize_title(title: str) -> str:
 
 def _titles_for_era(era: str, index_path: Path) -> list[tuple[str, str]]:
     try:
-        index, _md5_index, _crc32_index = _hash_lookup._load_cached(index_path)
+        index, _md5_index, _crc32_index = _hash_lookup.load_index(index_path)
     except FileNotFoundError:
         # No index present. Degrade to no candidates so fuzzy_title_match()
         # returns None, the same degrade-to-empty behavior classify() already
-        # applies when _load_cached fails for the sha1/md5/crc32 tiers.
+        # applies when load_index fails for the sha1/md5/crc32 tiers.
         return []
     mtime = index_path.stat().st_mtime
     key = (index_path, era)

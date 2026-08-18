@@ -97,7 +97,7 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
                    title, never proof. Do not use this tier to
                    authenticate a file or to make an unsafe decision.
     """
-    index, md5_index, crc32_index = _load_cached(index_path)
+    index, md5_index, crc32_index = load_index(index_path)
     if not index:
         return None
 
@@ -155,7 +155,16 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
     return None
 
 
-def _load_cached(index_path: Path) -> tuple[dict, dict, dict]:
+def load_index(index_path: Path) -> tuple[dict, dict, dict]:
+    """Load (and mtime-cache) the sha1/md5/crc32 indices at *index_path*.
+
+    Documented internal API: called across module boundaries by classify.py,
+    verify.py, and hashing/title_match.py, not just from within this module,
+    so it is not underscore-prefixed despite not being part of the public
+    formatscout.__init__ surface. Raises FileNotFoundError if index_path
+    does not exist and is not the default cache location (which is fetched
+    instead, see _fetch_default_index).
+    """
     if not index_path.exists():
         if index_path == _DEFAULT_INDEX_PATH:
             _fetch_default_index()

@@ -15,7 +15,7 @@ Three things are covered here, none of which had any coverage before:
 
 Every test points detector._INDEX_PATH at a nonexistent tmp_path file via
 fx.patch_detector_index(), so the real ~88MB hash_index.json is never read.
-hash_lookup._load_cached() raises FileNotFoundError for a missing path, which
+hash_lookup.load_index() raises FileNotFoundError for a missing path, which
 _detect() already catches and falls through on, which is exactly the Tier-1
 miss these tests want. The two tests that do want a Tier-1 hit build a
 synthetic index instead.
@@ -367,7 +367,7 @@ class TestHashTier:
 
     def test_missing_index_falls_through_to_signal_detection(self, tmp_path: Path, monkeypatch):
         """A missing hash_index.json raises FileNotFoundError out of
-        _load_cached(); detect() must swallow it and keep going rather than
+        load_index(); detect() must swallow it and keep going rather than
         surfacing it as a detection failure.
         """
         _no_index(monkeypatch, tmp_path)

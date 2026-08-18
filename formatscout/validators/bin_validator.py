@@ -2,6 +2,7 @@ from pathlib import Path
 
 from ..magic.magic_detect import detect_from_magic
 from ..result import ScanResult
+from ..utils.pointer_file import read_capped_lines
 
 
 def resolve_bin_cue(
@@ -143,9 +144,7 @@ def _parse_cue_track_type(cue_path: Path) -> str | None:
     Returns None if the cue sheet is unreadable or contains no TRACK line.
     """
     try:
-        with open(cue_path, "rb") as f:
-            raw = f.read(64 * 1024)  # cue sheets are a few hundred bytes, cap defends against a giant file
-        for line in raw.decode("utf-8", errors="replace").splitlines():
+        for line in read_capped_lines(cue_path):
             stripped = line.strip().upper()
             if stripped.startswith("TRACK "):
                 parts = stripped.split()

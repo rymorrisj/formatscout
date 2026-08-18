@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from ..constants import ISO_LOGICAL_SECTOR_BYTES, ROOT_DIR_READ_CAP_BYTES
+from ..iso9660_dir import iter_dir_records
 
 _TOML_PATH = Path(__file__).parent / "magic_signatures.toml"
 
@@ -37,13 +38,17 @@ def _classify_system_cnf(content: str) -> str:
     return "ps2" if "BOOT2" in content else "ps1"
 
 
-def _resolve_ps_generation_from_file(cnf_path: Path) -> str:
+def resolve_ps_generation_from_file(cnf_path: Path) -> str:
     """
     Classify PS1 vs PS2 from an already-extracted SYSTEM.CNF file on disk.
 
     Used for directory-based items: the file is directly readable, no CD
     sector arithmetic needed. Uses the same BOOT/BOOT2 marker logic as
     _resolve_ps_generation.
+
+    Documented internal API: called from directory_detect.py, not just
+    within this module, so it is not underscore-prefixed despite not being
+    part of the public formatscout.__init__ surface.
 
     Returns "unknown" if the file cannot be read. Never a guessed console.
     Callers must treat "unknown" as no signal, not as PS1.
@@ -113,24 +118,11 @@ def _resolve_ps_generation(path: Path) -> str:
 
             system_cnf_lba = None
             system_cnf_size = 0
-            i = 0
-            while i < len(dir_data):
-                rec_len = dir_data[i]
-                if rec_len == 0:
-                    i += 1
-                    continue
-                if i + 33 > len(dir_data):
+            for rec in iter_dir_records(dir_data):
+                if rec.name == "SYSTEM.CNF":
+                    system_cnf_lba = rec.lba
+                    system_cnf_size = rec.size
                     break
-                name_len = dir_data[i + 32]
-                if i + 33 + name_len > len(dir_data):
-                    break
-                name = dir_data[i + 33: i + 33 + name_len].decode("ascii", errors="replace")
-                name = name.split(";")[0]
-                if name.upper() == "SYSTEM.CNF":
-                    system_cnf_lba = struct.unpack_from("<I", dir_data, i + 2)[0]
-                    system_cnf_size = struct.unpack_from("<I", dir_data, i + 10)[0]
-                    break
-                i += rec_len
 
             if system_cnf_lba is None:
                 return "unknown"

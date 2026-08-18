@@ -6,9 +6,12 @@ from formatscout.tests import smart_media_fixtures as fx
 
 
 # ---------------------------------------------------------------------------
-# _detect_from_pe(), confirmed untouched by the consolidation fix: still has
-# its own Subsystem gate, still a distinct function from exe_detect.detect_exe()
-# even though both now compute the same PE-header classification independently.
+# _detect_from_pe(): still a distinct function from exe_detect.detect_exe(),
+# still applies its own AUTORUN.INF-specific reason text and Subsystem gate,
+# but the consolidation fix moved the actual PE-header classification (MZ/PE
+# checks, offset math, Subsystem gate, MajorOperatingSystemVersion split)
+# into a single shared exe_detect._classify_pe_header() helper both functions
+# call, no longer two independently-duplicated implementations.
 # ---------------------------------------------------------------------------
 
 class TestDetectFromPe:
@@ -55,9 +58,9 @@ class TestDetectFromPe:
 
     def test_agrees_with_exe_detect_detect_exe_for_the_same_header(self, tmp_path: Path):
         """directory_detect._detect_from_pe() and exe_detect.detect_exe() now
-        compute the same PE-subsystem/version classification via independent,
-        duplicated code paths, not delegation, confirm they still agree
-        rather than having silently diverged.
+        share the same underlying exe_detect._classify_pe_header() call, so
+        era/confidence agreement is guaranteed by construction rather than
+        needing to be independently maintained; this pins that it holds.
         """
         from formatscout.exe_detect import detect_exe
 

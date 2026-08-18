@@ -66,9 +66,8 @@ def _reject_internal_entities(raw: bytes, path: Path) -> None:
     """Refuse a DAT whose DOCTYPE declares entities in its internal subset.
 
     xml.etree.ElementTree expands internal entity declarations. That makes
-    it vulnerable to entity-expansion denial of service (billion laughs,
-    quadratic blowup) on untrusted input, and DAT files are third-party
-    downloads.
+    it vulnerable to entity-expansion denial of service on untrusted input, 
+    and DAT files are third-party downloads.
 
     Two reasons this is rejected up front instead of mitigated:
     - defusedxml, the usual mitigation, is a new runtime dependency this
@@ -134,44 +133,34 @@ def parse_dat(path: Path) -> list[dict]:
             continue
 
         for rom in game.iter("rom"):
-            try:
-                sha1 = (rom.get("sha1") or "").lower().strip()
-                md5 = (rom.get("md5") or "").lower().strip()
-                # Logiqx/Redump/TOSEC spell the attribute "crc"; "crc32" is a
-                # tolerated variant seen in some hand-rolled DATs.
-                crc32 = (rom.get("crc") or rom.get("crc32") or "").lower().strip()
+            sha1 = (rom.get("sha1") or "").lower().strip()
+            md5 = (rom.get("md5") or "").lower().strip()
+            # Logiqx/Redump/TOSEC spell the attribute "crc"; "crc32" is a
+            # tolerated variant seen in some hand-rolled DATs.
+            crc32 = (rom.get("crc") or rom.get("crc32") or "").lower().strip()
 
-                if not sha1 and not md5 and not crc32:
-                    logger.warning(
-                        "Skipping rom '%s' in game '%s' (%s): no hash fields",
-                        rom.get("name", ""),
-                        game_name,
-                        path.name,
-                    )
-                    continue
-
-                record: dict = {
-                    "title": game_name,
-                    "platform": platform,
-                    "era": _resolve_era_from_platform(platform),
-                    "source": source,
-                }
-                if sha1:
-                    record["sha1"] = sha1
-                if md5:
-                    record["md5"] = md5
-                if crc32:
-                    record["crc32"] = crc32
-
-                records.append(record)
-
-            except Exception as exc:
+            if not sha1 and not md5 and not crc32:
                 logger.warning(
-                    "Skipping malformed rom entry in game '%s' (%s): %s",
+                    "Skipping rom '%s' in game '%s' (%s): no hash fields",
+                    rom.get("name", ""),
                     game_name,
                     path.name,
-                    exc,
                 )
                 continue
+
+            record: dict = {
+                "title": game_name,
+                "platform": platform,
+                "era": _resolve_era_from_platform(platform),
+                "source": source,
+            }
+            if sha1:
+                record["sha1"] = sha1
+            if md5:
+                record["md5"] = md5
+            if crc32:
+                record["crc32"] = crc32
+
+            records.append(record)
 
     return records

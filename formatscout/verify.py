@@ -21,7 +21,7 @@ def verify(path: Path, expected_sha1: str) -> VerifyResult:
     computed_sha1 = _hash_lookup.hash_file(path).sha1
 
     try:
-        index, _md5_index, _crc32_index = _hash_lookup._load_cached(_INDEX_PATH)
+        index, _md5_index, _crc32_index = _hash_lookup.load_index(_INDEX_PATH)
     except FileNotFoundError:
         index = {}
 

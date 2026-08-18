@@ -28,7 +28,7 @@ def classify(
     computed_sha1 = hashes.sha1
 
     try:
-        index, md5_index, crc32_index = _hash_lookup._load_cached(_INDEX_PATH)
+        index, md5_index, crc32_index = _hash_lookup.load_index(_INDEX_PATH)
     except FileNotFoundError:
         index, md5_index, crc32_index = {}, {}, {}
 

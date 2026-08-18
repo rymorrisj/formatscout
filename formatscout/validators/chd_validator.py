@@ -1,6 +1,7 @@
 import struct
 from pathlib import Path
 
+from ..constants import CD_SIZE_THRESHOLD_BYTES
 from ..result import ScanResult
 
 _CHD_MAGIC = b"MComprHD"
@@ -19,9 +20,9 @@ _RAWSHA1_LEN = 20
 
 # logicalbytes: uncompressed image size in bytes (CHD v5 header, chd.h).
 # Used only to distinguish CD-sized (PS1) from DVD-sized (PS2) media when the
-# CHTR/CHT2 tag alone can't tell them apart.
+# CHTR/CHT2 tag alone can't tell them apart. iso_detect.py uses a separate
+# 4.7 GB PS1/PS2 boundary (DVD5_SIZE_THRESHOLD_BYTES), not this one.
 _LOGICAL_BYTES_OFFSET = 32
-_CD_SIZE_THRESHOLD = 800 * 1024 * 1024  # ~800 MB, independent heuristic; iso_detect.py uses a separate 4.7 GB PS1/PS2 boundary
 
 # Defends the metadata-chain walk below against a crafted file whose next_offset
 # chain cycles or wanders past EOF: real CHD files have a handful of metadata
@@ -114,7 +115,7 @@ def detect_chd_platform(path: Path) -> ScanResult:
                     # Deciding properly needs SYSTEM.CNF, which means
                     # decompressing hunks. Fall back to logical size as a
                     # non-authoritative guess instead.
-                    if logical_bytes and logical_bytes <= _CD_SIZE_THRESHOLD:
+                    if logical_bytes and logical_bytes <= CD_SIZE_THRESHOLD_BYTES:
                         era, size_desc = "ps1", f"{logical_bytes} bytes, CD-sized"
                     elif logical_bytes:
                         era, size_desc = "ps2", f"{logical_bytes} bytes, DVD-sized"

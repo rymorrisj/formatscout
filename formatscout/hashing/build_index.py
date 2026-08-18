@@ -29,7 +29,7 @@ def _write_index_atomically(index: dict, output_path: Path) -> None:
     """Serialise *index* to a sibling temp file, then os.replace() it into place.
 
     - A crash or full disk during a direct write would leave the index
-      truncated and no longer valid JSON. hash_lookup._load_cached then
+      truncated and no longer valid JSON. hash_lookup.load_index then
       fails on that.
     - os.replace() is atomic within a filesystem, so readers see either
       the old complete index or the new one.

@@ -2,14 +2,17 @@ import struct
 from pathlib import Path
 
 from .constants import (
+    CD_SIZE_THRESHOLD_BYTES,
+    DVD5_SIZE_THRESHOLD_BYTES,
     DVD_SIZE_THRESHOLD_BYTES,
     ISO_LOGICAL_SECTOR_BYTES,
-    POINTER_FILE_READ_CAP_BYTES,
     ROOT_DIR_READ_CAP_BYTES,
 )
+from .iso9660_dir import iter_dir_records
+from .utils.pointer_file import read_capped_lines
 from .xbox_image import detect_xbox_image_type
 from .magic.magic_detect import detect_from_magic
-from .result import ScanResult
+from .result import ScanResult, null_scan_result
 from .validators import bin_validator
 from .validators import chd_validator
 
@@ -76,7 +79,7 @@ def detect_chd(path: Path) -> ScanResult:
 # ── ISO 9660 PVD ─────────────────────────────────────────────────────────────
 
 def detect_from_pvd(iso_path: Path) -> ScanResult:
-    _null = ScanResult(title=None, platform=None, era=None, confidence=0.0, reason="")
+    _null = null_scan_result()
     try:
         with iso_path.open("rb") as fh:
             fh.seek(32768)  # sector 16 at 2048 bytes/sector
@@ -142,7 +145,7 @@ def detect_from_pvd(iso_path: Path) -> ScanResult:
                 size_bytes = iso_path.stat().st_size
             except OSError:
                 size_bytes = 0
-            if vol_starts_ps and size_bytes > 4_700_000_000:
+            if vol_starts_ps and size_bytes > DVD5_SIZE_THRESHOLD_BYTES:
                 return ScanResult(
                     title=None, platform=None, era="ps2", confidence=0.75,
                     reason=f"ISO volume label '{vol_id}' matches PS2 pattern (DVD size)",
@@ -164,8 +167,8 @@ def detect_from_pvd(iso_path: Path) -> ScanResult:
 def _read_root_dir(iso_path: Path, pvd: bytes) -> bytes:
     """Read the ISO 9660 root directory's raw bytes, located via the PVD's root
     LBA/size fields (offsets 158/166). Read once by detect_from_pvd and passed
-    into both _root_dir_entry_names and _detect_from_xbe_scan below instead of
-    each independently reopening the file and re-deriving the same LBA/size math.
+    into _root_dir_entry_names below instead of independently reopening the
+    file and re-deriving the same LBA/size math.
     """
     if len(pvd) < 190:
         return b""
@@ -185,37 +188,11 @@ def _root_dir_entry_names(dir_data: bytes) -> list[str]:
     """Return upper-cased, version-stripped file/dir names from raw ISO 9660
     root directory bytes (as produced by _read_root_dir).
     """
-    names: list[str] = []
-    i = 0
-    while i < len(dir_data):
-        rec_len = dir_data[i]
-        if rec_len == 0:
-            i = (i | 2047) + 1
-            continue
-        if i + 33 > len(dir_data):
-            break
-        name_len = dir_data[i + 32]
-        if i + 33 + name_len > len(dir_data):
-            break
-        name = dir_data[i + 33: i + 33 + name_len].decode("ascii", errors="replace")
-        names.append(name.split(";")[0].upper())
-        i += rec_len
-    return names
-
-
-def _detect_from_xbe_scan(dir_data: bytes) -> ScanResult:
-    """Scan raw ISO 9660 root directory bytes for an .xbe entry.
-
-    Takes pre-read bytes and never touches the filesystem itself, see
-    _read_root_dir. detect_from_pvd() calls _xbe_result_from_names() directly
-    with the entry list it has already parsed, so this wrapper exists for
-    callers holding only the raw bytes.
-    """
-    return _xbe_result_from_names(_root_dir_entry_names(dir_data))
+    return [rec.name for rec in iter_dir_records(dir_data)]
 
 
 def _xbe_result_from_names(names: list[str]) -> ScanResult:
-    _null = ScanResult(title=None, platform=None, era=None, confidence=0.0, reason="")
+    _null = null_scan_result()
     for name in names:
         if name.endswith(".XBE"):
             return ScanResult(
@@ -253,7 +230,7 @@ def _iso_size_fallback(path: Path, *, iso9660_confirmed: bool = False) -> ScanRe
             reason=f"ISO exceeds 4 GB, {signal}",
             warnings=["could be PS2 or Xbox OG, please select era manually"],
         )
-    if size < 800 * 1024 * 1024:
+    if size < CD_SIZE_THRESHOLD_BYTES:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.2,
             reason=f"ISO under 800 MB, {signal}",
@@ -270,9 +247,7 @@ def _iso_size_fallback(path: Path, *, iso9660_confirmed: bool = False) -> ScanRe
 
 def _cue_bin_path(cue_path: Path) -> Path | None:
     try:
-        with open(cue_path, "rb") as f:
-            raw = f.read(POINTER_FILE_READ_CAP_BYTES)
-        for line in raw.decode("utf-8", errors="replace").splitlines():
+        for line in read_capped_lines(cue_path):
             line = line.strip()
             if line.upper().startswith("FILE "):
                 parts = line.split('"')

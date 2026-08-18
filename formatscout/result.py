@@ -37,6 +37,18 @@ class ScanResult:
     warnings: list[str] = field(default_factory=list)
 
 
+def null_scan_result() -> ScanResult:
+    """Zero-confidence, no-signal ScanResult.
+
+    A factory, not a shared module-level constant: ScanResult is a mutable
+    dataclass (not frozen), and detector.py sets requires_install on the
+    result it receives back from a detection tier. A single shared instance
+    returned by reference from five call sites would let that mutation leak
+    into every other caller's "no signal" result.
+    """
+    return ScanResult(title=None, platform=None, era=None, confidence=0.0, reason="")
+
+
 @dataclass(slots=True)
 class VerifyResult:
     """Result of verify(), a hash-only re-check of a single file, distinct

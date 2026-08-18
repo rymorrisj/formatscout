@@ -83,7 +83,7 @@ flowchart TD
     DirDispatch --> Autorun["Tier 4a: _detect_from_autorun()<br/>AUTORUN.INF OPEN=/RUN= -&gt; pointed .exe's PE header"]
     Autorun -- "era resolved" --> AutoR["era=dos/win98/winxp, 0.65-0.75"]
     Autorun -- "no signal" --> DirHeur["Tier 4b: _detect_from_directory()"]
-    DirHeur -- "root marker files (XPSP/I386, WIN98/95,<br/>SYSTEM.CNF, INSTALL.*)" --> DirR3["era resolved by marker, 0.4-0.8<br/>(SYSTEM.CNF via magic_detect._resolve_ps_generation_from_file)"]
+    DirHeur -- "root marker files (XPSP/I386, WIN98/95,<br/>SYSTEM.CNF, INSTALL.*)" --> DirR3["era resolved by marker, 0.4-0.8<br/>(SYSTEM.CNF via magic_detect.resolve_ps_generation_from_file)"]
     DirHeur -- "depth-2 scan (DOS tools, .WAD,<br/>split archives, .BAT, DOS-only exts)" --> DirR4["era=dos, 0.5-0.6"]
     DirHeur -- "nothing matched" --> DirR5["confidence=0.0"]
 
@@ -92,7 +92,7 @@ flowchart TD
     Stamp["_compute_requires_install(path, result.era)<br/>sets ScanResult.requires_install"] --> Final(["ScanResult returned to caller<br/>(detect() wraps all of this in try/except,<br/>any unexpected error -&gt; confidence=0.0)"])
 ```
 
-PE parsing (`.exe` files and `AUTORUN.INF` targets) is handled by `exe_detect.py` and `directory_detect.py` independently. Both gate on `Subsystem` (GUI/console only) then read `MajorOperatingSystemVersion` to split Win98-era from WinXP-era. `test_directory_detect.py` pins that the two stay in agreement.
+PE parsing (`.exe` files and `AUTORUN.INF` targets) is handled by `exe_detect.detect_exe()` and `directory_detect._detect_from_pe()`, which both delegate the header classification (MZ/PE checks, `Subsystem` gate, `MajorOperatingSystemVersion` split) to a shared `exe_detect._classify_pe_header()` helper; only the reason text they build from it differs. `test_directory_detect.py` pins that the two stay in agreement.
 
 `_compute_requires_install()` in `detector.py` runs after era detection and flags DOS-era installer media. That includes raw `.iso`/`.cue` files, small `.img` files, and directories whose only root-level executables are on the blocklist in `utils/blocklist.py`.
 

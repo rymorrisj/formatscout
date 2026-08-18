@@ -124,10 +124,10 @@ class TestLookupDispatch:
 
 
 # ---------------------------------------------------------------------------
-# _load_cached(), mtime-keyed cache
+# load_index(), mtime-keyed cache
 # ---------------------------------------------------------------------------
 
-class TestLoadCachedMtimeCache:
+class TestLoadIndexMtimeCache:
     def test_same_mtime_reuses_cached_object_no_reparse(self, tmp_path: Path):
         """Confirmed by object identity: a fresh json.load() on a second call
         would build a brand-new dict, so `is` staying true proves the cached
@@ -137,8 +137,8 @@ class TestLoadCachedMtimeCache:
         index_path = fx.write_synthetic_index(tmp_path)
         hash_lookup._index_cache.clear()
 
-        index1, md5_1, crc32_1 = hash_lookup._load_cached(index_path)
-        index2, md5_2, crc32_2 = hash_lookup._load_cached(index_path)
+        index1, md5_1, crc32_1 = hash_lookup.load_index(index_path)
+        index2, md5_2, crc32_2 = hash_lookup.load_index(index_path)
 
         assert index1 is index2
         assert md5_1 is md5_2
@@ -149,12 +149,12 @@ class TestLoadCachedMtimeCache:
         index_path = fx.write_synthetic_index(tmp_path)
         hash_lookup._index_cache.clear()
 
-        index1, _md5_1, _crc32_1 = hash_lookup._load_cached(index_path)
+        index1, _md5_1, _crc32_1 = hash_lookup.load_index(index_path)
 
         new_mtime = index_path.stat().st_mtime + 5
         os.utime(index_path, (new_mtime, new_mtime))
 
-        index2, _md5_2, _crc32_2 = hash_lookup._load_cached(index_path)
+        index2, _md5_2, _crc32_2 = hash_lookup.load_index(index_path)
 
         assert index1 is not index2
         assert index1 == index2  # same content, just re-parsed into a new object
@@ -170,12 +170,12 @@ class TestLoadCachedMtimeCache:
         index_path = fx.write_synthetic_index(tmp_path)
         hash_lookup._index_cache.clear()
 
-        index1, _, _ = hash_lookup._load_cached(index_path)
+        index1, _, _ = hash_lookup.load_index(index_path)
         equal_but_distinct_path = Path(str(index_path))
         assert equal_but_distinct_path is not index_path
         assert equal_but_distinct_path == index_path
 
-        index2, _, _ = hash_lookup._load_cached(equal_but_distinct_path)
+        index2, _, _ = hash_lookup.load_index(equal_but_distinct_path)
 
         assert index1 is index2
 
@@ -184,4 +184,4 @@ class TestLoadCachedMtimeCache:
         missing = tmp_path / "does_not_exist.json"
 
         with pytest.raises(FileNotFoundError):
-            hash_lookup._load_cached(missing)
+            hash_lookup.load_index(missing)

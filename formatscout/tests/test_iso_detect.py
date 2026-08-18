@@ -112,13 +112,15 @@ class TestRootDirEntryNames:
 
 
 # ---------------------------------------------------------------------------
-# _detect_from_xbe_scan, takes pre-read dir_data, no file access
+# _xbe_result_from_names(_root_dir_entry_names(dir_data)), takes pre-read
+# dir_data, no file access. detect_from_pvd() composes these two directly
+# rather than through a wrapper, since that is its only production caller.
 # ---------------------------------------------------------------------------
 
 class TestDetectFromXbeScan:
     def _call(self, dir_data: bytes):
-        from formatscout.iso_detect import _detect_from_xbe_scan
-        return _detect_from_xbe_scan(dir_data)
+        from formatscout.iso_detect import _root_dir_entry_names, _xbe_result_from_names
+        return _xbe_result_from_names(_root_dir_entry_names(dir_data))
 
     def test_finds_xbe_case_insensitively(self):
         dir_data = fx._dir_record(b"default.xbe", 0, 0)
@@ -138,7 +140,7 @@ class TestDetectFromXbeScan:
 
 # ---------------------------------------------------------------------------
 # Regression: iso_detect reopen dedupe (perf pass, commit 98ce932).
-# _root_dir_entry_names()/_detect_from_xbe_scan() take pre-read dir_data
+# _root_dir_entry_names()/_xbe_result_from_names() take pre-read dir_data
 # bytes, not a Path, they must never touch the filesystem themselves, and
 # detect_from_pvd() must read the root directory exactly once and reuse it
 # for both the PS3_DISC.SFB check and the .xbe scan.
@@ -147,21 +149,22 @@ class TestDetectFromXbeScan:
 class TestIsoDetectReopenAvoidance:
     def test_root_dir_entry_names_and_xbe_scan_never_touch_the_filesystem(self, monkeypatch):
         from formatscout.iso_detect import (
-            _detect_from_xbe_scan,
             _root_dir_entry_names,
+            _xbe_result_from_names,
         )
 
         def _boom(self, *a, **kw):
             raise AssertionError(
-                "_root_dir_entry_names()/_detect_from_xbe_scan() must not open any file "
+                "_root_dir_entry_names()/_xbe_result_from_names() must not open any file "
                 "themselves, they must operate purely on pre-read dir_data bytes"
             )
 
         monkeypatch.setattr(Path, "open", _boom)
 
         dir_data = fx._dir_record(b"GAME.XBE", 0, 0) + fx._dir_record(b"OTHER.DAT", 0, 0)
-        assert _root_dir_entry_names(dir_data) == ["GAME.XBE", "OTHER.DAT"]
-        assert _detect_from_xbe_scan(dir_data).era == "xbox"
+        names = _root_dir_entry_names(dir_data)
+        assert names == ["GAME.XBE", "OTHER.DAT"]
+        assert _xbe_result_from_names(names).era == "xbox"
 
     def test_detect_from_pvd_opens_the_file_exactly_twice(self, tmp_path: Path, monkeypatch):
         """One open for the PVD sector read, one for the root directory read

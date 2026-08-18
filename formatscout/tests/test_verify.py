@@ -62,7 +62,7 @@ class TestVerifyDispatch:
         assert result.computed_sha1 == computed
 
     def test_not_in_index_when_index_file_missing_entirely(self, tmp_path: Path, monkeypatch):
-        """verify() catches FileNotFoundError from _load_cached() and treats
+        """verify() catches FileNotFoundError from load_index() and treats
         a missing index the same as an empty one, rather than raising.
         """
         fx.patch_verify_index(monkeypatch, tmp_path / "does_not_exist.json")

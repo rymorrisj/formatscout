@@ -78,7 +78,7 @@ def patch_detector_index(monkeypatch, index_path: Path) -> None:
     or another dispatch target directly) on a directory: detect()'s Tier-1
     hash_lookup.lookup() call reads and caches the real ~88MB hash_index.json
     on first use otherwise. Pointing at a tmp_path with no file at all is the
-    normal case here (not a synthetic index), hash_lookup._load_cached()
+    normal case here (not a synthetic index), hash_lookup.load_index()
     raises FileNotFoundError immediately for a missing path, which detect()
     already catches and falls through on, so this is the fast, minimal way to
     isolate a directory-dispatch test from the real index without building one.
@@ -260,7 +260,7 @@ def place_chd_metadata_entry(buf: bytearray, offset: int, tag: bytes, next_offse
 
 # ---------------------------------------------------------------------------
 # Part 1.2, synthetic 2352-byte Mode-2 CD sector builder, for
-# magic_detect._resolve_ps_generation() / _resolve_ps_generation_from_file()
+# magic_detect._resolve_ps_generation() / resolve_ps_generation_from_file()
 # ---------------------------------------------------------------------------
 
 SECTOR = 2352
@@ -389,7 +389,7 @@ def build_pe_header(
 # ---------------------------------------------------------------------------
 # Part 2, plain ISO 9660 image builder (2048 bytes/sector, no Mode-2/2352
 # raw-CD framing), for iso_detect.detect_from_pvd() / _root_dir_entry_names()
-# / _detect_from_xbe_scan(). Distinct from Part 1.2's Mode-2 BIN sector
+# / _xbe_result_from_names(). Distinct from Part 1.2's Mode-2 BIN sector
 # builder above: detect_from_pvd() reads a plain .iso file directly at
 # 2048-byte sector boundaries (fh.seek(32768) for the PVD sector, root_lba *
 # 2048 for the root directory), no 24-byte Mode-2 data offset involved.

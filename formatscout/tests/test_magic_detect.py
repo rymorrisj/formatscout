@@ -140,13 +140,13 @@ class TestDetectFromMagicPerSignature:
 
 
 # ---------------------------------------------------------------------------
-# _resolve_ps_generation_from_file(), SYSTEM.CNF already extracted to disk
+# resolve_ps_generation_from_file(), SYSTEM.CNF already extracted to disk
 # ---------------------------------------------------------------------------
 
 class TestResolvePsGenerationFromFile:
     def _call(self, cnf_path: Path) -> str:
-        from formatscout.magic.magic_detect import _resolve_ps_generation_from_file
-        return _resolve_ps_generation_from_file(cnf_path)
+        from formatscout.magic.magic_detect import resolve_ps_generation_from_file
+        return resolve_ps_generation_from_file(cnf_path)
 
     def test_boot_key_resolves_ps1(self, tmp_path: Path):
         cnf = tmp_path / "SYSTEM.CNF"
@@ -244,8 +244,9 @@ class TestClassifySystemCnf:
 
 def _copy_magic_detect_into_isolated_package(tmp_path: Path) -> tuple[Path, Path]:
     """Rebuild just enough real package structure for magic_detect.py's
-    "from ..constants import ..." to resolve, so the subprocess import
-    actually reaches TOML parsing instead of failing at that import first.
+    "from ..constants import ..." and "from ..iso9660_dir import ..." to
+    resolve, so the subprocess import actually reaches TOML parsing instead
+    of failing at one of those imports first.
 
     Returns (sub_pkg, real_source): the directory the copy lives in, and the
     path to the real magic_detect.py it was copied from.
@@ -254,6 +255,7 @@ def _copy_magic_detect_into_isolated_package(tmp_path: Path) -> tuple[Path, Path
 
     real_source = Path(_real_module.__file__)
     real_constants = real_source.parent.parent / "constants.py"
+    real_iso9660_dir = real_source.parent.parent / "iso9660_dir.py"
 
     pkg_root = tmp_path / "magic_detect_import_test_pkg"
     sub_pkg = pkg_root / "sub"
@@ -262,6 +264,7 @@ def _copy_magic_detect_into_isolated_package(tmp_path: Path) -> tuple[Path, Path
     (pkg_root / "__init__.py").write_text("", encoding="utf-8")
     (sub_pkg / "__init__.py").write_text("", encoding="utf-8")
     shutil.copy(real_constants, pkg_root / "constants.py")
+    shutil.copy(real_iso9660_dir, pkg_root / "iso9660_dir.py")
     shutil.copy(real_source, sub_pkg / "magic_detect_import_test.py")
 
     return sub_pkg, real_source
