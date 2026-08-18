@@ -1,3 +1,4 @@
+import logging
 import struct
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from .magic.magic_detect import detect_from_magic
 from .result import ScanResult, null_scan_result
 from .validators import bin_validator
 from .validators import chd_validator
+
+logger = logging.getLogger(__name__)
 
 _DOS_PUBLISHERS = frozenset({
     "GT INTERACTIVE", "ID SOFTWARE", "APOGEE", "3D REALMS", "SIERRA ON-LINE",
@@ -256,5 +259,6 @@ def _cue_bin_path(cue_path: Path) -> Path | None:
                     if candidate.exists():
                         return candidate
         return None
-    except Exception:
+    except (OSError, struct.error, UnicodeDecodeError) as exc:
+        logger.debug("Failed to parse cue sheet %s: %s", cue_path, exc)
         return None

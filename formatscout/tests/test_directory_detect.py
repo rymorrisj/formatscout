@@ -138,3 +138,164 @@ class TestParseAutorunExe:
         autorun.write_bytes(content)
 
         assert self._call(autorun) == "SETUP.EXE"
+
+
+# ---------------------------------------------------------------------------
+# detect_directory(): dispatch between the AUTORUN.INF tier and the
+# marker-file/depth-2 heuristic tier. Previously untested per README's Known
+# Gaps section.
+# ---------------------------------------------------------------------------
+
+class TestDetectDirectory:
+    def _call(self, root: Path):
+        from formatscout.directory_detect import detect_directory
+        return detect_directory(root)
+
+    def test_autorun_inf_reaches_pe_detection_end_to_end(self, tmp_path: Path):
+        """detect_directory() -> _detect_from_autorun() -> _parse_autorun_exe()
+        -> _detect_from_pe() chained together with real files throughout,
+        nothing mocked.
+        """
+        exe_path = tmp_path / "SETUP.EXE"
+        exe_path.write_bytes(fx.build_pe_header(major_os_version=5, subsystem=3))
+        autorun = tmp_path / "AUTORUN.INF"
+        autorun.write_text("[autorun]\nOPEN=SETUP.EXE\n")
+
+        result = self._call(tmp_path)
+
+        assert result.era == "winxp"
+        assert result.confidence == 0.75
+
+    def test_autorun_present_but_no_signal_falls_through_to_directory_heuristics(self, tmp_path: Path):
+        """AUTORUN.INF exists but its OPEN= target is not a recognisable PE
+        (not even a .exe extension), so _detect_from_autorun() returns a null
+        result. detect_directory() must fall through to
+        _detect_from_directory() rather than stopping there.
+        """
+        (tmp_path / "AUTORUN.INF").write_text("[autorun]\nOPEN=readme.txt\n")
+        (tmp_path / "PS3_DISC.SFB").write_bytes(b"\x00")
+
+        result = self._call(tmp_path)
+
+        assert result.era == "ps3"
+
+    def test_no_signal_anywhere_returns_null(self, tmp_path: Path):
+        # A lone .txt file is not a no-signal fixture here: .txt is one of
+        # the extensions _detect_from_directory()'s "DOS-only root
+        # extensions" branch treats as DOS-era on its own. .png isn't in
+        # that set and matches nothing else either.
+        (tmp_path / "image.png").write_bytes(b"\x00")
+
+        result = self._call(tmp_path)
+
+        assert result.era is None
+        assert result.confidence == 0.0
+
+
+# ---------------------------------------------------------------------------
+# _detect_from_directory(): root marker-file heuristics and the depth-2
+# fallback scan, reached only after detect_directory() finds no AUTORUN.INF
+# signal. Previously untested per README's Known Gaps section.
+# ---------------------------------------------------------------------------
+
+class TestDetectFromDirectory:
+    def _call(self, root: Path):
+        from formatscout.directory_detect import _detect_from_directory
+        return _detect_from_directory(root)
+
+    def test_ps3_disc_sfb_marker(self, tmp_path: Path):
+        """Newest marker-file branch added to this function, and the least
+        covered before this test existed.
+        """
+        (tmp_path / "PS3_DISC.SFB").write_bytes(b"\x00")
+
+        result = self._call(tmp_path)
+
+        assert result.era == "ps3"
+        assert result.confidence == 0.9
+        assert "PS3_DISC.SFB" in result.reason
+
+    def test_ps3_marker_wins_even_alongside_other_root_files(self, tmp_path: Path):
+        (tmp_path / "PS3_DISC.SFB").write_bytes(b"\x00")
+        (tmp_path / "readme.txt").write_text("unrelated")
+
+        result = self._call(tmp_path)
+
+        assert result.era == "ps3"
+
+    def test_xpsp_marker_is_winxp(self, tmp_path: Path):
+        (tmp_path / "XPSP").mkdir()
+
+        result = self._call(tmp_path)
+
+        assert result.era == "winxp"
+        assert result.confidence == 0.6
+
+    def test_install_bat_marker_is_dos(self, tmp_path: Path):
+        (tmp_path / "INSTALL.BAT").write_bytes(b"@echo off\n")
+
+        result = self._call(tmp_path)
+
+        assert result.era == "dos"
+        assert result.confidence == 0.55
+
+    def test_depth2_dos_tool_fallback(self, tmp_path: Path):
+        """DEICE.EXE one level below root, not at the root itself, only
+        found by the depth-2 scan, not any root-level marker check above it.
+        """
+        subdir = tmp_path / "DATA"
+        subdir.mkdir()
+        (subdir / "DEICE.EXE").write_bytes(b"\x00")
+
+        result = self._call(tmp_path)
+
+        assert result.era == "dos"
+        assert result.confidence == 0.6
+        assert "DEICE.EXE" in result.reason
+
+    def test_depth2_wad_file_fallback(self, tmp_path: Path):
+        subdir = tmp_path / "DATA"
+        subdir.mkdir()
+        (subdir / "DOOM.WAD").write_bytes(b"\x00")
+
+        result = self._call(tmp_path)
+
+        assert result.era == "dos"
+        assert "WAD" in result.reason
+
+    def test_root_marker_checked_before_depth2_scan(self, tmp_path: Path):
+        """A root-level marker (PS3_DISC.SFB) must win even when a depth-2
+        DOS-tool file is also present, confirming the marker checks run
+        first and short-circuit before the depth-2 scan is ever reached.
+        """
+        (tmp_path / "PS3_DISC.SFB").write_bytes(b"\x00")
+        subdir = tmp_path / "DATA"
+        subdir.mkdir()
+        (subdir / "DEICE.EXE").write_bytes(b"\x00")
+
+        result = self._call(tmp_path)
+
+        assert result.era == "ps3"
+
+    def test_no_signal_returns_null(self, tmp_path: Path):
+        # See TestDetectDirectory.test_no_signal_anywhere_returns_null: a
+        # lone .txt file is not no-signal here, it hits the DOS-only root
+        # extensions branch. .png matches nothing.
+        (tmp_path / "image.png").write_bytes(b"\x00")
+
+        result = self._call(tmp_path)
+
+        assert result.era is None
+        assert result.confidence == 0.0
+        assert result.reason == "no signal found"
+
+    def test_unreadable_directory_returns_null_with_reason(self, tmp_path: Path, monkeypatch):
+        def _boom(self):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(Path, "iterdir", _boom)
+
+        result = self._call(tmp_path)
+
+        assert result.era is None
+        assert result.reason == "cannot list directory"

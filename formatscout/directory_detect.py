@@ -1,9 +1,13 @@
+import logging
+import struct
 from pathlib import Path
 
 from .constants import DIRECTORY_DEPTH2_SCAN_CAP_ENTRIES
 from .exe_detect import _classify_pe_header
 from .result import ScanResult, null_scan_result
 from .utils.pointer_file import read_capped_lines
+
+logger = logging.getLogger(__name__)
 
 _WINDOWS_MARKERS = frozenset({"WINDOWS", "WIN", "SYSTEM", "SYSTEM32", "PROGRAM FILES", "PROGRA~1"})
 _DOS_TOOLS = frozenset({"DEICE.EXE", "PKUNZIP.EXE", "PKUNZIP.COM", "LZMA.EXE"})
@@ -50,7 +54,8 @@ def _parse_autorun_exe(autorun: Path) -> str | None:
                 if value.lower().endswith(".exe"):
                     return value
         return None
-    except Exception:
+    except (OSError, struct.error, UnicodeDecodeError) as exc:
+        logger.debug("Failed to parse AUTORUN.INF at %s: %s", autorun, exc)
         return None
 
 

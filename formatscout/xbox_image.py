@@ -5,9 +5,13 @@ through ScanResult.requires_extraction on the standard detect()/classify()
 result objects, never by importing this module directly.
 """
 
+import logging
+import struct
 from pathlib import Path
 
 from .constants import DVD_SIZE_THRESHOLD_BYTES
+
+logger = logging.getLogger(__name__)
 
 _XBOX_MAGIC = b"MICROSOFT*XBOX*MEDIA"
 _XBOX_MAGIC_OFFSET = 0x10000
@@ -42,5 +46,6 @@ def detect_xbox_image_type(path: Path) -> str:
                 return "iso9660"
 
             return "unknown"
-    except Exception:
+    except (OSError, struct.error, UnicodeDecodeError) as exc:
+        logger.debug("Failed to inspect %s for Xbox/ISO 9660 magic: %s", path, exc)
         return "unknown"

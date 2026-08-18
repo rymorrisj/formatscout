@@ -40,8 +40,8 @@ Runs in tier order, stops at the first confident match.
 | 1 | Hash Lookup | Full-file SHA-1 (MD5/CRC32 fallback) matched against the bundled preservation index. CHD containers match on the embedded `rawsha1` header field instead of raw file bytes. | 1.0 |
 | 2 | Magic Bytes | Header signature matching at fixed byte offsets. Covers PS1, PS2, N64, NES, Dreamcast. | 0.9 |
 | 3 | Structural Parsing | ISO 9660 PVD sector inspection, CHD v5 metadata walking, PE executable subsystem/OS parsing. | 0.65 – 0.9 |
-| 4 | Directory Heuristics | AUTORUN.INF targets, root-level system markers (I386, SYSTEM.CNF, WIN98/95), depth-2 executable scans. | 0.4 – 0.75 |
-| 5 | Extension & Size | File extension alone, or extension plus size for ambiguous cases (e.g. 4 GiB optical boundary). | 0.1 – 0.5 |
+| 4 | Directory Heuristics | AUTORUN.INF targets, root-level system markers (PS3_DISC.SFB, I386, SYSTEM.CNF, WIN98/95), depth-2 executable scans. | 0.4 – 0.9 |
+| 5 | Extension & Size | File extension alone, or extension plus size for ambiguous cases (e.g. 4 GiB optical boundary). | 0.2 – 0.7 |
 
 Diagram reflects the actual code path in `detector.py`, `iso_detect.py`, and `directory_detect.py`. If it disagrees with the table above, trust the diagram.
 
@@ -83,7 +83,7 @@ flowchart TD
     DirDispatch --> Autorun["Tier 4a: _detect_from_autorun()<br/>AUTORUN.INF OPEN=/RUN= -&gt; pointed .exe's PE header"]
     Autorun -- "era resolved" --> AutoR["era=dos/win98/winxp, 0.65-0.75"]
     Autorun -- "no signal" --> DirHeur["Tier 4b: _detect_from_directory()"]
-    DirHeur -- "root marker files (XPSP/I386, WIN98/95,<br/>SYSTEM.CNF, INSTALL.*)" --> DirR3["era resolved by marker, 0.4-0.8<br/>(SYSTEM.CNF via magic_detect.resolve_ps_generation_from_file)"]
+    DirHeur -- "root marker files (PS3_DISC.SFB, XPSP/I386, WIN98/95,<br/>SYSTEM.CNF, INSTALL.*)" --> DirR3["era resolved by marker, 0.4-0.9<br/>(PS3_DISC.SFB checked first -&gt; ps3 0.9;<br/>SYSTEM.CNF via magic_detect.resolve_ps_generation_from_file)"]
     DirHeur -- "depth-2 scan (DOS tools, .WAD,<br/>split archives, .BAT, DOS-only exts)" --> DirR4["era=dos, 0.5-0.6"]
     DirHeur -- "nothing matched" --> DirR5["confidence=0.0"]
 
@@ -121,7 +121,7 @@ Check `scan.era` for `None` to decide whether `detect()` succeeded. `scan.warnin
 
 ### Public API
 
-Nine names are exported from `__init__.py`. Everything else is internal.
+Ten names are exported from `__init__.py`. Everything else is internal.
 
 | Name | Signature | Notes |
 |---|---|---|
@@ -131,6 +131,7 @@ Nine names are exported from `__init__.py`. Everything else is internal.
 | `hash_file` | `(path) -> HashFileResult` | sha1/md5/crc32 in one read |
 | `extract_embedded_sha1` | `(path) -> str \| None` | CHD v5 embedded `rawsha1`, no hunk decompression |
 | `ScanResult`, `VerifyResult`, `ClassifyResult`, `HashFileResult` | N/A | Result dataclasses; see `result.py` docstrings |
+| `Era` | `Literal["ps1", "ps2", ...]` | Type hint only, `ScanResult.era`'s value space; runtime values are still plain `str \| None` |
 
 ## Supported platforms / eras
 
@@ -202,11 +203,11 @@ DAT files are third-party, untrusted input. `dat_parser.parse_dat()` rejects any
 uv run pytest formatscout/tests/
 ```
 
-Known gaps: `title_match.py` and `xbox_image.py` have no dedicated test file. Each is reached only indirectly through another module's tests. `directory_detect.py`'s marker-file heuristics, `detect_directory()` and `_detect_from_directory()`, are untested.
+Known gaps: `title_match.py` and `xbox_image.py` have no dedicated test file. Each is reached only indirectly through another module's tests.
 
 ## Contributing
 
-Open an issue for bugs or detection gaps. For new DAT sources or platform support, include a sample of the DAT header so the `_ERA_MARKERS` mapping can be verified before merging
+Open an issue for bugs or detection gaps. For new DAT sources or platform support, include a sample of the DAT header so the `_ERA_MARKERS` mapping can be verified before merging. See [CONTRIBUTING.md](CONTRIBUTING.md) for PR expectations.
 
 ## Disclaimer
 

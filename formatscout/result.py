@@ -1,6 +1,21 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
+# The full era vocabulary any detection tier can assign to ScanResult.era.
+# Confirmed by grepping every `era=` assignment package-wide, not just
+# guessed from the platform list. "unknown" and "cdrom_sync_ambiguous" are
+# deliberately excluded: both are internal return values of plain str-typed
+# helper functions (magic_detect._resolve_ps_generation,
+# resolve_ps_generation_from_file, and a magic_signatures.toml sentinel
+# compared via ==), never assigned to era= on a ScanResult.
+Era = Literal[
+    "ps1", "ps2", "ps3",
+    "xbox", "xbox360",
+    "dreamcast",
+    "n64", "nes", "snes",
+    "dos", "win95", "win98", "winxp",
+]
+
 
 @dataclass(slots=True, frozen=True)
 class HashFileResult:
@@ -29,7 +44,7 @@ class ScanResult:
     """
     title: str | None
     platform: str | None
-    era: str | None
+    era: Era | None
     confidence: float
     reason: str
     requires_install: bool = False

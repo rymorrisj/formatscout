@@ -1,3 +1,4 @@
+import logging
 import struct
 import tomllib
 from pathlib import Path
@@ -5,6 +6,8 @@ from typing import BinaryIO
 
 from ..constants import ISO_LOGICAL_SECTOR_BYTES, ROOT_DIR_READ_CAP_BYTES
 from ..iso9660_dir import iter_dir_records
+
+logger = logging.getLogger(__name__)
 
 _TOML_PATH = Path(__file__).parent / "magic_signatures.toml"
 
@@ -57,7 +60,8 @@ def resolve_ps_generation_from_file(cnf_path: Path) -> str:
         with cnf_path.open("rb") as fh:
             content = fh.read(512).decode("ascii", errors="replace")
         return _classify_system_cnf(content)
-    except Exception:
+    except (OSError, struct.error, UnicodeDecodeError) as exc:
+        logger.debug("Failed to read SYSTEM.CNF at %s: %s", cnf_path, exc)
         return "unknown"
 
 
@@ -131,7 +135,8 @@ def _resolve_ps_generation(path: Path) -> str:
                 fh, system_cnf_lba, min(system_cnf_size or 512, 512),
             )
             return _classify_system_cnf(raw_cnf.decode("ascii", errors="replace"))
-    except Exception:
+    except (OSError, struct.error, UnicodeDecodeError) as exc:
+        logger.debug("Failed to resolve PS generation from raw CD sectors of %s: %s", path, exc)
         return "unknown"
 
 
@@ -163,5 +168,12 @@ def detect_from_magic(path: Path, extension: str) -> tuple[str | None, str]:
                     return sig["era"], sig["reason"]
 
         return None, ""
-    except Exception:
+    except (OSError, struct.error, UnicodeDecodeError) as exc:
+        # Same (None, "") return as the "no signature matched" case above,
+        # deliberately: callers already treat that as "no signal" and adding
+        # a distinct return shape here would ripple through every caller for
+        # a difference only useful for debugging. The debug log is what
+        # actually distinguishes the two: a read/parse failure logs, a clean
+        # no-match does not.
+        logger.debug("Failed to read %s while matching magic signatures: %s", path, exc)
         return None, ""

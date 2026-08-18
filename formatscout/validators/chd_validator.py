@@ -1,8 +1,11 @@
+import logging
 import struct
 from pathlib import Path
 
 from ..constants import CD_SIZE_THRESHOLD_BYTES
 from ..result import ScanResult
+
+logger = logging.getLogger(__name__)
 
 _CHD_MAGIC = b"MComprHD"
 _META_CHTR = b"CHTR"
@@ -50,7 +53,8 @@ def extract_embedded_sha1(path: Path) -> str | None:
             if raw == b"\x00" * _RAWSHA1_LEN:
                 return None
             return raw.hex()
-    except Exception:
+    except (OSError, struct.error, UnicodeDecodeError) as exc:
+        logger.debug("Failed to read embedded rawsha1 from %s: %s", path, exc)
         return None
 
 
@@ -139,7 +143,8 @@ def detect_chd_platform(path: Path) -> ScanResult:
             reason="CHD container detected but no recognised platform metadata tag found",
             warnings=["no CHGD/CHTR/CHT2 tag in metadata chain"],
         )
-    except Exception as exc:
+    except (OSError, struct.error) as exc:
+        logger.debug("Failed to read CHD metadata from %s: %s", path, exc)
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
             reason=f"CHD read error: {exc}",

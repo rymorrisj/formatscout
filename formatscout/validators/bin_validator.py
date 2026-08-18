@@ -1,8 +1,12 @@
+import logging
+import struct
 from pathlib import Path
 
 from ..magic.magic_detect import detect_from_magic
 from ..result import ScanResult
 from ..utils.pointer_file import read_capped_lines
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_bin_cue(
@@ -151,5 +155,6 @@ def _parse_cue_track_type(cue_path: Path) -> str | None:
                 if len(parts) >= 3:
                     return parts[2]
         return None
-    except Exception:
+    except (OSError, struct.error, UnicodeDecodeError) as exc:
+        logger.debug("Failed to parse cue sheet %s: %s", cue_path, exc)
         return None

@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: pip install -e .[test]
+
+      # Malformed magic_signatures.toml (parsed at magic_detect.py import
+      # time) or a circular import anywhere in the package breaks this
+      # before a single test runs, so it is checked on its own rather than
+      # only implicitly via pytest collection.
+      - name: Import check
+        run: python -c "import formatscout"
+
+      - name: Run tests
+        run: pytest formatscout/tests/
