@@ -47,7 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the old raising behavior (now `IndexUnavailable`). A missing index file at a
   custom path is still an empty index.
 - The issue code `index_unavailable` that `detect()` attached is now spelled
-  `INDEX_UNAVAILABLE`, the same code `classify()` and `verify()` use.
+  `INDEX_UNAVAILABLE`, the same code `classify()` and `verify()` use. Every
+  issue code is now uppercase: `UNEXPECTED_ERROR`, `POINTER_REJECTED`,
+  `CHD_HEADER_TRUNCATED`, `HASH_FAILED`, `INDEX_MISSING` and
+  `CHD_RAWSHA1_MISSING`, with no lowercase aliases (these codes were never
+  in a tagged release).
 - The home directory is no longer read at import. The default cache path is
   computed when first needed; if the home directory cannot be determined that
   is an unavailable index (set `FORMATSCOUT_INDEX_PATH` or pass `index_path=`)

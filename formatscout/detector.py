@@ -91,7 +91,7 @@ def detect(
             warnings=[str(exc)],
             status=Status.ERROR,
             method=Method.NONE,
-            issues=(Issue("unexpected_error", _one_line(f"{type(exc).__name__}: {exc}")),),
+            issues=(Issue("UNEXPECTED_ERROR", _one_line(f"{type(exc).__name__}: {exc}")),),
         )
 
 

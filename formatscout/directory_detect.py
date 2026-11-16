@@ -52,7 +52,7 @@ def _detect_from_autorun(root: Path) -> ScanResult:
         if resolution.status == "rejected":
             message = rejection_warning(exe_rel, resolution.reason or "rejected")
             _null.warnings.append(message)
-            _null.issues += (Issue("pointer_rejected", message),)
+            _null.issues += (Issue("POINTER_REJECTED", message),)
             return _null
         if resolution.path is None:
             return _null

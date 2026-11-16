@@ -645,7 +645,7 @@ class TestUncheckedAndStrict:
 
         classified = _classify_module.classify(game, "t", "ps1", index_path=missing, strict=True)
         assert classified.status == "not_in_index"
-        assert [issue.code for issue in classified.issues] == ["index_missing"]
+        assert [issue.code for issue in classified.issues] == ["INDEX_MISSING"]
         assert _verify_module.verify(game, _SHA1, index_path=missing, strict=True).status == "not_in_index"
 
     def test_unreadable_file_keeps_its_existing_behavior(self, tmp_path: Path):
@@ -654,7 +654,7 @@ class TestUncheckedAndStrict:
 
         result = _classify_module.classify(missing_file, "t", "ps1", index_path=good, strict=True)
         assert result.status == "unchecked"
-        assert [issue.code for issue in result.issues] == ["hash_failed"]
+        assert [issue.code for issue in result.issues] == ["HASH_FAILED"]
         assert result.computed_sha1 is None
         with pytest.raises(OSError):
             _verify_module.verify(missing_file, _SHA1, index_path=good)

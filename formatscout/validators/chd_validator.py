@@ -92,7 +92,7 @@ def detect_chd_platform(path: Path) -> ScanResult:
                     reason="CHD header truncated, could not read metadata offset",
                     status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container="chd",
                     evidence=("chd_magic",),
-                    issues=(Issue("chd_header_truncated", "CHD header ends before the metadata offset field"),),
+                    issues=(Issue("CHD_HEADER_TRUNCATED", "CHD header ends before the metadata offset field"),),
                 )
             meta_offset = struct.unpack(">Q", raw)[0]
 

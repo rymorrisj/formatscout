@@ -76,7 +76,7 @@ def detect_cue(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> S
     pointer_warnings: list[str] = []
     result = _detect_cue(path, dir_cache, pointer_warnings)
     result.warnings.extend(pointer_warnings)
-    result.issues += tuple(Issue("pointer_rejected", message) for message in pointer_warnings)
+    result.issues += tuple(Issue("POINTER_REJECTED", message) for message in pointer_warnings)
     return result
 
 

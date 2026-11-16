@@ -321,7 +321,7 @@ class ClassifyResult:
         "not_in_index", no hash matched and no confident title match either.
             Neutral, "we have no data on this file", not a warning.
         "unchecked", no classification was possible, for one of two reasons
-            that the issue code tells apart. "hash_failed": the file could not
+            that the issue code tells apart. "HASH_FAILED": the file could not
             be hashed at all (missing, unreadable, permission error); only an
             OSError from hashing produces this. "INDEX_UNAVAILABLE": the file
             hashed fine but the hash index could not be obtained or used
@@ -331,7 +331,7 @@ class ClassifyResult:
 
     computed_sha1 is the file's own raw sha1 (hash_file()'s result), persisted
     whenever hashing succeeds, regardless of which status was reached. It is
-    None only for "unchecked" with a "hash_failed" issue. This is not the embedded CHD rawsha1 used
+    None only for "unchecked" with a "HASH_FAILED" issue. This is not the embedded CHD rawsha1 used
     internally for the verified-tier lookup, a caller needing that value
     should use validators.chd_validator.extract_embedded_sha1 directly.
 
@@ -349,9 +349,9 @@ class ClassifyResult:
     hash_kind: which hash matched: "sha1" (the file's own sha1),
         "chd_rawsha1" (a CHD header's embedded rawsha1), "md5" or "crc32".
         None when no hash matched.
-    issues: Issue(code, message) tuples: "hash_failed" or "INDEX_UNAVAILABLE"
-        for "unchecked", "index_missing" when a missing custom index file was
-        treated as empty, "chd_rawsha1_missing" when a .chd had no usable
+    issues: Issue(code, message) tuples: "HASH_FAILED" or "INDEX_UNAVAILABLE"
+        for "unchecked", "INDEX_MISSING" when a missing custom index file was
+        treated as empty, "CHD_RAWSHA1_MISSING" when a .chd had no usable
         embedded rawsha1 and its raw file sha1 was looked up instead.
     """
     status: Literal["verified", "caution", "mismatch", "not_in_index", "unchecked"]

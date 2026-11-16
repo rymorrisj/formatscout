@@ -147,8 +147,8 @@ class TestClassifyResultDefaults:
             ClassifyResult("verified", "ab", None, None, "r", "ps1")  # type: ignore[misc]
 
     def test_issues_are_coerced(self):
-        result = ClassifyResult("unchecked", None, None, None, "r", issues=[("hash_failed", "m")])
-        assert result.issues == (Issue("hash_failed", "m"),)
+        result = ClassifyResult("unchecked", None, None, None, "r", issues=[("HASH_FAILED", "m")])
+        assert result.issues == (Issue("HASH_FAILED", "m"),)
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +246,7 @@ class TestDetectorSites:
         _tags(result, Method.NONE, Status.ERROR, False)
         assert result.reason == "unexpected detection error"
         assert result.warnings == ["kaboom\nsecond line"]
-        assert result.issues == (Issue("unexpected_error", "RuntimeError: kaboom second line"),)
+        assert result.issues == (Issue("UNEXPECTED_ERROR", "RuntimeError: kaboom second line"),)
 
     def test_missing_path_is_error(self, tmp_path: Path):
         _tags(detector.detect(tmp_path / "missing.iso"), Method.NONE, Status.ERROR, False)
@@ -402,7 +402,7 @@ class TestIsoSites:
         cue = tmp_path / "g.cue"
         cue.write_text(build_cue([(HOSTILE_PARENT_POSIX, [(1, "MODE2/2352")])]), encoding="ascii")
         result = iso_detect.detect_cue(cue)
-        assert [issue.code for issue in result.issues] == ["pointer_rejected"]
+        assert [issue.code for issue in result.issues] == ["POINTER_REJECTED"]
         assert result.issues[0].message in result.warnings
 
     @pytest.mark.parametrize(
@@ -522,7 +522,7 @@ class TestDirectorySites:
     def test_autorun_rejected_pointer_issue_reaches_fallback_result(self, tmp_path: Path):
         root = _dir(tmp_path / "disc", {"AUTORUN.INF": b"[autorun]\r\nOPEN=..\\EVIL.EXE\r\n"})
         result = directory_detect.detect_directory(root)
-        assert [issue.code for issue in result.issues] == ["pointer_rejected"]
+        assert [issue.code for issue in result.issues] == ["POINTER_REJECTED"]
         assert result.issues[0].message in result.warnings
 
     def test_unlistable_directory_is_error(self, tmp_path: Path):
@@ -597,7 +597,7 @@ class TestChdSites:
         result = chd_validator.detect_chd_platform(_write(tmp_path / "g.chd", b"MComprHD" + b"\x00" * 40))
         _tags(result, Method.STRUCTURAL, Status.CONTAINER_ONLY, False)
         assert result.container == "chd"
-        assert [issue.code for issue in result.issues] == ["chd_header_truncated"]
+        assert [issue.code for issue in result.issues] == ["CHD_HEADER_TRUNCATED"]
 
     def test_chgd_is_structural_guess(self, tmp_path: Path):
         result = chd_validator.detect_chd_platform(_write(tmp_path / "g.chd", _chd_with_tag(b"CHGD")))
@@ -689,7 +689,7 @@ class TestClassifyFields:
         fx.patch_classify_index(monkeypatch, fx.write_synthetic_index(tmp_path))
         result = _classify(_write(tmp_path / "g.chd", bytes(fx.build_chd_header())), "x", "ps1")
         assert result.status == "not_in_index"
-        assert [issue.code for issue in result.issues] == ["chd_rawsha1_missing"]
+        assert [issue.code for issue in result.issues] == ["CHD_RAWSHA1_MISSING"]
 
     def test_mismatch_carries_searched_era(self, tmp_path: Path, monkeypatch):
         fx.patch_classify_index(monkeypatch, fx.write_synthetic_index(tmp_path))
@@ -705,12 +705,12 @@ class TestClassifyFields:
         # conftest points classify at a nonexistent custom index path.
         result = _classify(_write(tmp_path / "g.bin", fx.UNINDEXED_CONTENT), "x", "ps1")
         assert result.status == "not_in_index"
-        assert [issue.code for issue in result.issues] == ["index_missing"]
+        assert [issue.code for issue in result.issues] == ["INDEX_MISSING"]
 
     def test_unchecked_records_issue(self, tmp_path: Path):
         result = _classify(tmp_path / "missing.bin", "x", "ps1")
         assert result.status == "unchecked"
-        assert [issue.code for issue in result.issues] == ["hash_failed"]
+        assert [issue.code for issue in result.issues] == ["HASH_FAILED"]
 
     def test_classify_module_index_hook_still_patchable(self, tmp_path: Path, monkeypatch):
         classify_module = importlib.import_module("formatscout.classify")

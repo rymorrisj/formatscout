@@ -28,12 +28,12 @@ def classify(
     FORMATSCOUT_INDEX_PATH / default-cache resolution (see index_path.py).
 
     status="unchecked" covers two cases, told apart by the issue code: an
-    OSError while hashing the file (hash_failed), and an index that cannot be
+    OSError while hashing the file (HASH_FAILED), and an index that cannot be
     obtained or used (INDEX_UNAVAILABLE: offline mode, backoff, a failed
     download, an oversized or corrupt index; computed_sha1 is still set).
     With strict=True the second case raises IndexUnavailable instead. A
     missing index file at a custom path (FileNotFoundError) is neither: it is
-    treated as an empty index, with an index_missing issue.
+    treated as an empty index, with an INDEX_MISSING issue.
     """
     explicit_index = coerce_index_path(index_path)
     try:
@@ -42,7 +42,7 @@ def classify(
         return ClassifyResult(
             status="unchecked", computed_sha1=None, matched_title=None, similarity=None,
             reason=f"could not hash file: {exc}",
-            issues=(Issue("hash_failed", f"could not hash file: {exc}"),),
+            issues=(Issue("HASH_FAILED", f"could not hash file: {exc}"),),
         )
 
     computed_sha1 = hashes.sha1
@@ -54,7 +54,7 @@ def classify(
             index, md5_index, crc32_index = _hash_lookup.load_index(resolved_index)
         except FileNotFoundError:
             index, md5_index, crc32_index = {}, {}, {}
-            issues.append(Issue("index_missing", "index file not found, treated as an empty index"))
+            issues.append(Issue("INDEX_MISSING", "index file not found, treated as an empty index"))
     except IndexUnavailable as exc:
         if strict:
             raise
@@ -77,7 +77,7 @@ def classify(
             sha1_kind = "chd_rawsha1"
         else:
             issues.append(Issue(
-                "chd_rawsha1_missing", "no usable embedded rawsha1 in the CHD header, raw file sha1 looked up instead",
+                "CHD_RAWSHA1_MISSING", "no usable embedded rawsha1 in the CHD header, raw file sha1 looked up instead",
             ))
 
     if lookup_sha1 in index:
