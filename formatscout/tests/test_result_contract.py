@@ -238,7 +238,7 @@ class TestMagicTags:
 
 class TestDetectorSites:
     def test_catch_all_is_error(self, monkeypatch, tmp_path: Path):
-        def _boom(path, dir_cache=None):
+        def _boom(path, *args, **kwargs):
             raise RuntimeError("kaboom\nsecond line")
 
         monkeypatch.setattr(detector, "_detect", _boom)

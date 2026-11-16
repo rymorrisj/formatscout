@@ -179,7 +179,10 @@ class TestLazyHome:
         code = (
             "import sys; sys.path.insert(0, sys.argv[1])\n"
             "from formatscout.hashing import hash_lookup\n"
-            "import formatscout.detector as d, formatscout.classify as c, formatscout.verify as v\n"
+            "import importlib\n"
+            "d = importlib.import_module('formatscout.detector')\n"
+            "c = importlib.import_module('formatscout.classify')\n"
+            "v = importlib.import_module('formatscout.verify')\n"
             "assert hash_lookup._CACHE_DIR is None and hash_lookup._DEFAULT_INDEX_PATH is None\n"
             "assert d._INDEX_PATH is None and c._INDEX_PATH is None and v._INDEX_PATH is None\n"
             "print('hooks-none')\n"
