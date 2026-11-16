@@ -3,8 +3,8 @@ from pathlib import Path
 
 from .constants import CD_SIZE_THRESHOLD_BYTES
 from .hashing import hash_lookup as _hash_lookup
-from .magic.magic_detect import detect_from_magic
-from .result import ScanResult
+from .magic.magic_detect import detect_from_magic, magic_tags
+from .result import Issue, Method, ScanResult, Status
 from .validators import bin_validator
 from .iso_detect import detect_iso, detect_cue, detect_chd, detect_from_pvd
 from .exe_detect import detect_exe
@@ -51,17 +51,22 @@ def _compute_requires_install(path: Path, era: str | None) -> bool:
 _MAX_WARNING_REASON_CHARS = 120
 
 
+def _one_line(text: str) -> str:
+    """*text* as a single printable line of at most _MAX_WARNING_REASON_CHARS."""
+    # Control characters (newlines, ESC, ...) become spaces so a message that
+    # embeds server or OS text cannot inject terminal escapes or extra lines.
+    printable = "".join(ch if ch.isprintable() else " " for ch in text)
+    line = " ".join(printable.split())
+    if len(line) > _MAX_WARNING_REASON_CHARS:
+        line = line[:_MAX_WARNING_REASON_CHARS - 3] + "..."
+    return line
+
+
 def _index_unavailable_warning(exc: Exception) -> str:
     """One-line ScanResult warning for a hash-tier failure caused by the index
     (not by the input file): offline mode, download backoff or failure, or an
     oversized/corrupt index."""
-    # Control characters (newlines, ESC, ...) become spaces so a message that
-    # embeds server or OS text cannot inject terminal escapes or extra lines.
-    printable = "".join(ch if ch.isprintable() else " " for ch in str(exc))
-    reason = " ".join(printable.split())
-    if len(reason) > _MAX_WARNING_REASON_CHARS:
-        reason = reason[:_MAX_WARNING_REASON_CHARS - 3] + "..."
-    return f"hash index unavailable: {reason}; heuristics only"
+    return f"hash index unavailable: {_one_line(str(exc))}; heuristics only"
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -82,6 +87,9 @@ def detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> ScanR
             confidence=0.0,
             reason="unexpected detection error",
             warnings=[str(exc)],
+            status=Status.ERROR,
+            method=Method.NONE,
+            issues=(Issue("unexpected_error", _one_line(f"{type(exc).__name__}: {exc}")),),
         )
 
 
@@ -90,6 +98,7 @@ def _detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> Scan
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
             reason="path does not exist",
+            status=Status.ERROR, method=Method.NONE,
         )
 
     # Tier 1: hash lookup, highest confidence, return immediately on a match
@@ -131,11 +140,14 @@ def _detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> Scan
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
             reason="path is neither a file nor a directory",
+            status=Status.UNSUPPORTED, method=Method.NONE,
         )
 
     result.requires_install = _compute_requires_install(path, result.era)
     if index_warning is not None and index_warning not in result.warnings:
         result.warnings.append(index_warning)
+    if index_warning is not None and all(issue.code != "index_unavailable" for issue in result.issues):
+        result.issues += (Issue("index_unavailable", index_warning),)
     return result
 
 
@@ -149,52 +161,64 @@ def _detect_file(path: Path, dir_cache: dict[Path, list[Path]] | None = None) ->
             title=None, platform=None, era=None, confidence=0.0,
             reason="NDS format is not supported",
             warnings=["NDS format is not supported by formatscout"],
+            status=Status.UNSUPPORTED, method=Method.EXTENSION, platform_hint="Nintendo DS",
         )
 
     if suffix == ".xiso":
         return ScanResult(
             title=None, platform=None, era="xbox", confidence=0.7,
             reason="file extension .xiso indicates Original Xbox disc image",
+            method=Method.EXTENSION, authoritative=False,
         )
 
     if suffix == ".xex":
         return ScanResult(
             title=None, platform=None, era="xbox360", confidence=0.7,
             reason="file extension .xex indicates Xbox 360 executable",
+            method=Method.EXTENSION, authoritative=False,
         )
 
     if suffix in {".z64", ".n64", ".v64"}:
         return ScanResult(
             title=None, platform=None, era="n64", confidence=0.7,
             reason=f"file extension {suffix} indicates Nintendo 64 ROM",
+            method=Method.EXTENSION, authoritative=False,
         )
 
     if suffix in {".sfc", ".smc", ".fig", ".swc"}:
         return ScanResult(
             title=None, platform=None, era="snes", confidence=0.7,
             reason=f"file extension {suffix} indicates SNES ROM",
+            method=Method.EXTENSION, authoritative=False,
         )
 
     if suffix == ".nes":
         return ScanResult(
             title=None, platform=None, era="nes", confidence=0.7,
             reason="file extension .nes indicates NES ROM",
+            method=Method.EXTENSION, authoritative=False,
         )
 
     if suffix in {".gdi", ".cdi"}:
         era, reason = detect_from_magic(path, suffix[1:])
         if era is not None:
-            return ScanResult(title=None, platform=None, era=era, confidence=0.9, reason=reason)
+            method, authoritative = magic_tags(reason)
+            return ScanResult(
+                title=None, platform=None, era=era, confidence=0.9, reason=reason,
+                method=method, authoritative=authoritative,
+            )
         return ScanResult(
             title=None, platform=None, era="dreamcast", confidence=0.5,
             reason=f"file extension {suffix} suggests Dreamcast disc image",
             warnings=["no magic byte match; era inferred from extension only"],
+            method=Method.EXTENSION, authoritative=False,
         )
 
     if suffix == ".pkg":
         return ScanResult(
             title=None, platform=None, era="ps3", confidence=0.7,
             reason="file extension .pkg indicates PlayStation 3 package",
+            method=Method.EXTENSION, authoritative=False,
         )
 
     if suffix == ".iso":
@@ -203,7 +227,11 @@ def _detect_file(path: Path, dir_cache: dict[Path, list[Path]] | None = None) ->
     if suffix == ".bin":
         era, reason = detect_from_magic(path, "bin")
         if era is not None:
-            return ScanResult(title=None, platform=None, era=era, confidence=0.9, reason=reason)
+            method, authoritative = magic_tags(reason)
+            return ScanResult(
+                title=None, platform=None, era=era, confidence=0.9, reason=reason,
+                method=method, authoritative=authoritative,
+            )
         pvd = detect_from_pvd(path)
         if pvd.era is not None:
             return pvd
@@ -222,12 +250,14 @@ def _detect_file(path: Path, dir_cache: dict[Path, list[Path]] | None = None) ->
                     title=None, platform=None, era="dos", confidence=0.35,
                     reason="file extension .img under 800 MB suggests DOS-era image",
                     warnings=["low confidence: era inferred from extension and size only"],
+                    method=Method.SIZE_HEURISTIC, authoritative=False,
                 )
         except OSError:
             pass
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
             reason="no signal found",
+            status=Status.NO_SIGNAL, method=Method.NONE,
         )
 
     if suffix == ".exe":
@@ -236,4 +266,5 @@ def _detect_file(path: Path, dir_cache: dict[Path, list[Path]] | None = None) ->
     return ScanResult(
         title=None, platform=None, era=None, confidence=0.0,
         reason="no signal found",
+        status=Status.NO_SIGNAL, method=Method.NONE,
     )

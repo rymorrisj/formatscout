@@ -4,7 +4,7 @@ from pathlib import Path
 
 from .constants import DIRECTORY_DEPTH2_SCAN_CAP_ENTRIES
 from .exe_detect import _classify_pe_header
-from .result import ScanResult, null_scan_result
+from .result import Candidate, Issue, Method, ScanResult, Status, null_scan_result, tier_for_confidence
 from .utils.pointer_file import read_capped_lines
 from .utils.safe_path import rejection_warning, resolve_pointer
 
@@ -25,6 +25,7 @@ def detect_directory(path: Path) -> ScanResult:
         return result
     fallback = _detect_from_directory(path)
     fallback.warnings.extend(result.warnings)
+    fallback.issues += result.issues
     return fallback
 
 
@@ -49,7 +50,9 @@ def _detect_from_autorun(root: Path) -> ScanResult:
         # root, which is the directory holding AUTORUN.INF (root here).
         resolution = resolve_pointer(root, exe_rel, root_relative=True)
         if resolution.status == "rejected":
-            _null.warnings.append(rejection_warning(exe_rel, resolution.reason or "rejected"))
+            message = rejection_warning(exe_rel, resolution.reason or "rejected")
+            _null.warnings.append(message)
+            _null.issues += (Issue("pointer_rejected", message),)
             return _null
         if resolution.path is None:
             return _null
@@ -58,6 +61,7 @@ def _detect_from_autorun(root: Path) -> ScanResult:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
             reason=f"autorun detection error: {exc}",
+            status=Status.ERROR, method=Method.NONE,
         )
 
 
@@ -91,23 +95,27 @@ def _detect_from_pe(exe_path: Path) -> ScanResult:
             return ScanResult(
                 title=None, platform=None, era=era, confidence=confidence,
                 reason="AUTORUN.INF points to MZ-only (DOS) executable",
+                method=Method.PE_HEADER, authoritative=False, evidence=("autorun_exe", "mz_too_short_for_pe"),
             )
         if branch == "no_pe_signature":
             return ScanResult(
                 title=None, platform=None, era=era, confidence=confidence,
                 reason="AUTORUN.INF exe has MZ header but no PE signature, likely DOS",
+                method=Method.PE_HEADER, authoritative=False, evidence=("autorun_exe", "mz_no_pe_signature"),
             )
         if branch == "era_match":
             label = "(Windows NT 5+)" if era == "winxp" else "(Windows 9x era)"
             return ScanResult(
                 title=None, platform=None, era=era, confidence=confidence,
                 reason=f"PE MajorOperatingSystemVersion={major_os} {label}",
+                method=Method.PE_HEADER, authoritative=False, evidence=("autorun_exe", "pe_major_os_version"),
             )
         return null_scan_result()
     except Exception as exc:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
             reason=f"PE parse error: {exc}",
+            status=Status.ERROR, method=Method.NONE,
         )
 
 
@@ -118,6 +126,7 @@ def _detect_from_directory(root: Path) -> ScanResult:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
             reason="cannot list directory",
+            status=Status.ERROR, method=Method.NONE,
         )
 
     # Checked first, same as the PVD root-dir scan in iso_detect.py: an exact
@@ -126,26 +135,34 @@ def _detect_from_directory(root: Path) -> ScanResult:
         return ScanResult(
             title=None, platform=None, era="ps3", confidence=0.9,
             reason="directory contains PS3_DISC.SFB, PS3 disc image",
+            method=Method.DIRECTORY_MARKER, authoritative=False, evidence=("dir_ps3_disc_sfb",),
         )
     if "XPSP" in entries or "I386" in entries:
         return ScanResult(
             title=None, platform=None, era="winxp", confidence=0.6,
             reason="directory contains Windows XP installer structure (XPSP or I386)",
+            method=Method.DIRECTORY_MARKER, authoritative=False, evidence=("dir_winxp_installer",),
         )
     if "WIN98" in entries or ("AUTOEXEC.BAT" in entries and "SYSTEM.DAT" in entries):
         return ScanResult(
             title=None, platform=None, era="win98", confidence=0.6,
             reason="directory contains Win98 marker files",
+            method=Method.DIRECTORY_MARKER, authoritative=False, evidence=("dir_win98_markers",),
         )
     if "WIN95" in entries or ("SETUP.EXE" in entries and "WIN.COM" in entries):
         return ScanResult(
             title=None, platform=None, era="win95", confidence=0.6,
             reason="directory contains Win95 marker files",
+            method=Method.DIRECTORY_MARKER, authoritative=False, evidence=("dir_win95_markers",),
         )
     if "SYSTEM.CNF" in entries:
         cnf_path = next(
             (e for e in root.iterdir() if e.is_file() and e.name.upper() == "SYSTEM.CNF"),
             None,
+        )
+        # An unreadable SYSTEM.CNF still narrows the answer to PS1 or PS2.
+        unread_candidates = tuple(
+            Candidate(ps, tier_for_confidence(0.4), ("dir_system_cnf_unreadable",)) for ps in ("ps1", "ps2")
         )
         if cnf_path is not None:
             from .magic.magic_detect import resolve_ps_generation_from_file
@@ -155,21 +172,28 @@ def _detect_from_directory(root: Path) -> ScanResult:
                     title=None, platform=None, era=None, confidence=0.4,
                     reason="directory contains SYSTEM.CNF but BOOT/BOOT2 key could not be read to confirm PS1 vs PS2",
                     warnings=["SYSTEM.CNF present but unreadable, select PS1 or PS2 manually"],
+                    status=Status.AMBIGUOUS, method=Method.SYSTEM_CNF,
+                    evidence=("dir_system_cnf_unreadable",), candidates=unread_candidates,
                 )
             boot_key = "BOOT2" if era == "ps2" else "BOOT"
             return ScanResult(
                 title=None, platform=None, era=era, confidence=0.8,
                 reason=f"directory SYSTEM.CNF {boot_key} key indicates {era.upper()}",
+                # Not authoritative: any readable SYSTEM.CNF without BOOT2 is called PS1.
+                method=Method.SYSTEM_CNF, authoritative=False, evidence=("dir_system_cnf",),
             )
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.4,
             reason="directory contains SYSTEM.CNF but file could not be read to confirm generation",
             warnings=["SYSTEM.CNF present but unreadable, select PS1 or PS2 manually"],
+            status=Status.AMBIGUOUS, method=Method.SYSTEM_CNF,
+            evidence=("dir_system_cnf_unreadable",), candidates=unread_candidates,
         )
     if "INSTALL.BAT" in entries or "INSTALL.COM" in entries:
         return ScanResult(
             title=None, platform=None, era="dos", confidence=0.55,
             reason="directory contains INSTALL.BAT or INSTALL.COM at root",
+            method=Method.DIRECTORY_MARKER, authoritative=False, evidence=("dir_dos_install_script",),
         )
 
     depth2_names: set[str] = set(entries)
@@ -193,22 +217,26 @@ def _detect_from_directory(root: Path) -> ScanResult:
         return ScanResult(
             title=None, platform=None, era="dos", confidence=0.6,
             reason=f"directory contains DOS decompression tool {matched}",
+            method=Method.DIRECTORY_MARKER, authoritative=False, evidence=("dir_dos_tool",),
         )
     if any(n.endswith(".WAD") for n in depth2_names):
         return ScanResult(
             title=None, platform=None, era="dos", confidence=0.55,
             reason="directory contains .WAD file (DOS game data)",
+            method=Method.DIRECTORY_MARKER, authoritative=False, evidence=("dir_wad_file",),
         )
     root_exts_all = {Path(e).suffix.lower() for e in entries}
     if root_exts_all.intersection({".1", ".2", ".3"}) and ".dat" in root_exts_all:
         return ScanResult(
             title=None, platform=None, era="dos", confidence=0.55,
             reason="directory contains split archive files (.1/.2/.3) with .DAT, DOS installer",
+            method=Method.DIRECTORY_MARKER, authoritative=False, evidence=("dir_split_archive",),
         )
     if any(e.endswith(".BAT") for e in entries) and not entries.intersection(_WINDOWS_MARKERS):
         return ScanResult(
             title=None, platform=None, era="dos", confidence=0.5,
             reason="directory contains .BAT file at root with no Windows indicators",
+            method=Method.DIRECTORY_MARKER, authoritative=False, evidence=("dir_root_bat",),
         )
     root_exts = {Path(e).suffix.lower() for e in entries if "." in e}
     dos_only = root_exts.issubset({".exe", ".com", ".bat", ".cfg", ".txt", ".ini", ""})
@@ -216,9 +244,11 @@ def _detect_from_directory(root: Path) -> ScanResult:
         return ScanResult(
             title=None, platform=None, era="dos", confidence=0.5,
             reason="directory contains only DOS-era executables with no Windows folders",
+            method=Method.DIRECTORY_MARKER, authoritative=False, evidence=("dir_dos_only_extensions",),
         )
 
     return ScanResult(
         title=None, platform=None, era=None, confidence=0.0,
         reason="no signal found",
+        status=Status.NO_SIGNAL, method=Method.NONE,
     )

@@ -2,8 +2,8 @@ import logging
 import struct
 from pathlib import Path
 
-from ..magic.magic_detect import detect_from_magic
-from ..result import ScanResult
+from ..magic.magic_detect import detect_from_magic, magic_tags
+from ..result import Candidate, Method, ScanResult, Status, tier_for_confidence
 from ..utils.pointer_file import read_capped_lines
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,11 @@ def resolve_bin_cue(
          is reached only when this function is called directly.
       3. If no .cue: return low-confidence result with actionable warning.
 
+    Status tags: a magic hit is tagged as magic_tags() says; MODE2/2352 is
+    "ambiguous" (PS1/PS2/Dreamcast candidates); MODE1/2352, AUDIO and other
+    track types are "container_only" (container "bin_cue"); no cue, or a cue
+    with no parseable TRACK, is "no_signal".
+
     dir_cache: caller-owned {parent_dir: entries} map so repeated calls in one
     directory share a single iterdir(). Scope it to one scan sequence, never a
     long-lived cache, or it will serve a stale directory listing.
@@ -44,6 +49,8 @@ def resolve_bin_cue(
                 f"{bin_path.name}: .bin files cannot be reliably identified without their "
                 "cue sheet, add the matching .cue file for accurate detection"
             ],
+            status=Status.NO_SIGNAL,
+            method=Method.NONE,
         )
 
     track_type = _parse_cue_track_type(cue_path)
@@ -53,12 +60,16 @@ def resolve_bin_cue(
     # reach here after it returned no era.
     era, reason = detect_from_magic(bin_path, "bin")
     if era is not None:
+        method, authoritative = magic_tags(reason)
         return ScanResult(
             title=None,
             platform=None,
             era=era,
             confidence=0.85,
             reason=f"{reason} (confirmed by {cue_path.name})",
+            method=method,
+            authoritative=authoritative,
+            container="bin_cue",
         )
 
     if track_type == "MODE2/2352":
@@ -75,6 +86,14 @@ def resolve_bin_cue(
                 "no magic byte match in first sector; add this title to the hash index "
                 "for definitive platform identification"
             ],
+            status=Status.AMBIGUOUS,
+            method=Method.STRUCTURAL,
+            container="bin_cue",
+            evidence=("cue_track_mode2_2352",),
+            candidates=tuple(
+                Candidate(candidate, tier_for_confidence(0.4), ("cue_track_mode2_2352",))
+                for candidate in ("ps1", "ps2", "dreamcast")
+            ),
         )
 
     if track_type == "MODE1/2352":
@@ -85,6 +104,10 @@ def resolve_bin_cue(
             confidence=0.35,
             reason=f"{cue_path.name} declares MODE1/2352, generic CD-ROM data disc, era undetermined",
             warnings=["no platform-specific signals found in MODE1 sector"],
+            status=Status.CONTAINER_ONLY,
+            method=Method.STRUCTURAL,
+            container="bin_cue",
+            evidence=("cue_track_mode1_2352",),
         )
 
     if track_type == "AUDIO":
@@ -95,6 +118,10 @@ def resolve_bin_cue(
             confidence=0.2,
             reason=f"{cue_path.name} first TRACK is AUDIO, no data track to inspect",
             warnings=["cue sheet describes an audio disc or multi-track image with audio first"],
+            status=Status.CONTAINER_ONLY,
+            method=Method.STRUCTURAL,
+            container="bin_cue",
+            evidence=("cue_track_audio",),
         )
 
     if track_type is not None:
@@ -105,6 +132,10 @@ def resolve_bin_cue(
             confidence=0.25,
             reason=f"{cue_path.name}: unrecognised track type '{track_type}'",
             warnings=["cannot infer platform from this track type"],
+            status=Status.CONTAINER_ONLY,
+            method=Method.STRUCTURAL,
+            container="bin_cue",
+            evidence=("cue_track_other",),
         )
 
     return ScanResult(
@@ -114,6 +145,8 @@ def resolve_bin_cue(
         confidence=0.2,
         reason=f"{cue_path.name}: cue sheet contains no parseable TRACK declaration",
         warnings=["malformed or empty cue sheet"],
+        status=Status.NO_SIGNAL,
+        method=Method.NONE,
     )
 
 

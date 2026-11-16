@@ -10,7 +10,7 @@
 
 Multi-tier format-identification for disk images and directory trees. Pure Python 3.11+ stdlib. Zero third-party runtime dependencies.
 
-Given a path, `detect()` returns a `ScanResult`: `title`, `platform`, `era`, `confidence` (0.0-1.0), a `reason`, optional `requires_install`/`requires_extraction` flags, and `warnings`. It never raises. A garbage or unreadable path returns `confidence=0.0` with an explanatory reason instead of an exception.
+Given a path, `detect()` returns a `ScanResult`: `title`, `platform`, `era`, `confidence` (0.0-1.0), a `reason`, optional `requires_install`/`requires_extraction` flags, and `warnings`, plus a `status`, `method` and `authoritative` flag that say how to read it (see [Result contract](#result-contract)). It never raises. A garbage or unreadable path returns `confidence=0.0` with an explanatory reason instead of an exception.
 
 Originally built for [Peach 1UP](https://github.com/rymorrisj/peach_1up), an emulator orchestration platform for retro media preservation. Extracted into a standalone package to help others do the same.
 
@@ -110,9 +110,15 @@ from pathlib import Path
 from formatscout import detect, verify, classify, hash_file
 
 scan = detect(Path("game.iso"))
-if scan.era is not None:
-    ...  # scan.title, scan.platform, scan.confidence, scan.reason
-    ...  # scan.requires_install, scan.requires_extraction
+if scan.status == "identified":    # era determined from proof (scan.authoritative is True)
+    ...  # scan.era, scan.title, scan.platform, scan.method
+elif scan.status == "guess":       # era set, but from a heuristic: confirm before trusting it
+    ...  # scan.era, scan.confidence, scan.reason, scan.warnings
+elif scan.status == "ambiguous":   # no era, but scan.candidates lists the likely ones
+    ...
+else:                              # container_only | unsupported | no_signal | error
+    ...  # scan.reason, scan.warnings, scan.issues
+# scan.requires_install, scan.requires_extraction apply whatever the status
 
 result = verify(Path("game.iso"), expected_sha1="...")
 result.status  # "matched" | "mismatched" | "not_in_index"
@@ -124,11 +130,48 @@ hashes = hash_file(Path("game.iso"))
 hashes.sha1, hashes.md5, hashes.crc32
 ```
 
-Check `scan.era` for `None` to decide whether `detect()` found a platform. A non-None era can still be a low-confidence guess: a CHD CHTR/CHT2 size guess is 0.3, a `.img` under 800 MiB is `dos` at 0.35, extension-only matches are 0.5 to 0.7, and a crc32 index hit is 0.75. Also check `confidence`, `reason` and `warnings`. No field marks a result as authoritative yet.
+### Result contract
+
+Use `status` and `authoritative`, not "is `era` None", to interpret a `ScanResult`. `era`, `confidence`, `reason` and `warnings` are unchanged: `era` is populated exactly as before, guesses included (a CHD CHTR/CHT2 size guess at 0.3, a `.img` under 800 MiB as `dos` at 0.35, extension-only matches at 0.5 to 0.7, a crc32 index hit at 0.75). The new fields are keyword-only with defaults, so positional construction of `ScanResult` still works.
+
+| `status` | `era` | Meaning |
+|---|---|---|
+| `identified` | set | Determined from proof; `authoritative` is True. |
+| `guess` | set | **Transitional.** Set from a heuristic (size threshold, extension, directory marker, PE OS version, volume label, SYSTEM.CNF default, crc32 hit). Exists only because `era` still carries guesses, and will be removed once it stops doing so. |
+| `ambiguous` | None | The signal narrows to a few eras, listed in `candidates`. |
+| `container_only` | None | Container or filesystem confirmed (`iso9660`, `chd`, `bin_cue`), but no platform. |
+| `unsupported` | None | Recognised but not mapped to an era (`.nds`, an index entry with no era, a path that is neither file nor directory). |
+| `no_signal` | None | Nothing usable found. |
+| `error` | None | The input could not be examined (missing path, read or parse error, the `detect()` catch-all). |
+
+`authoritative` is True only for a sha1 or md5 index hit, a CHD header `rawsha1` index hit, and a platform-unique magic signature (Dreamcast IP.BIN, N64, iNES). Everything else is not authoritative, including the XDVDFS magic (shared by Xbox 360), PS3_DISC.SFB by name, the CHD CHGD tag (also used by NAOMI GD-ROMs) and SYSTEM.CNF (any readable file without BOOT2 reads as PS1). It is always False when `era` is None.
+
+Other fields, all defaulted:
+
+- `method`: the rule that produced the result. One of `hash_sha1`, `hash_md5`, `hash_crc32`, `chd_header_claim` (index hit on the CHD header's embedded `rawsha1`, not checked against the hunks), `magic`, `structural`, `system_cnf`, `directory_marker`, `pe_header`, `extension`, `size_heuristic`, `none` (no rule produced a signal).
+- `container`: `iso9660`, `xdvdfs`, `chd` or `bin_cue` when confirmed, else None.
+- `candidates`: `Candidate(era, tier, evidence)` tuples for `ambiguous` results.
+- `evidence`: short stable codes for the specific signals, such as `pvd_volume_label_keyword`.
+- `issues`: `Issue(code, message)` tuples, for example `index_unavailable` (the hash tier did not run), `pointer_rejected`, `unexpected_error`. `warnings` is still filled in as before.
+- `platform_hint`: a platform the signal points at when `platform` is not set (for example `Nintendo DS` for `.nds`).
+
+`Status`, `Method` and `Tier` are `StrEnum`s, so `scan.status == "guess"` works. Constructing a `ScanResult` with contradictory values (an era-less result marked authoritative, an era with a status other than `identified`/`guess`) raises `ValueError`.
+
+`Tier` buckets a confidence value; `tier_for_confidence()` is the one mapping. The `confidence` float itself is unchanged.
+
+| `Tier` | `confidence` |
+|---|---|
+| `certain` | 1.0 |
+| `strong` | 0.85 to below 1.0 |
+| `moderate` | 0.5 to below 0.85 |
+| `weak` | above 0.0 to below 0.5 |
+| `none` | 0.0 (or below, or NaN) |
+
+`ClassifyResult` keeps its statuses and existing fields, and adds keyword-only `matched_era` (era of the matched index entry, or the era the title search was scoped to for `mismatch`), `hash_kind` (`sha1`, `chd_rawsha1`, `md5`, `crc32`, or None) and `issues` (`hash_failed`, `index_missing`, `chd_rawsha1_missing`). `matched_title` is still set only for `mismatch`.
 
 ### Public API
 
-Ten names are exported from `__init__.py`. Everything else is internal.
+Seventeen names are exported from `__init__.py`. Everything else is internal.
 
 | Name | Signature | Notes |
 |---|---|---|
@@ -139,6 +182,10 @@ Ten names are exported from `__init__.py`. Everything else is internal.
 | `extract_embedded_sha1` | `(path) -> str \| None` | CHD v5 embedded `rawsha1`, no hunk decompression |
 | `ScanResult`, `VerifyResult`, `ClassifyResult`, `HashFileResult` | N/A | Result dataclasses; see `result.py` docstrings |
 | `Era` | `Literal["ps1", "ps2", ...]` | Type hint only, `ScanResult.era`'s value space; runtime values are still plain `str \| None` |
+| `Status`, `Method`, `Tier` | `StrEnum` | `ScanResult.status`/`method` and `Candidate.tier` values, see [Result contract](#result-contract) |
+| `Candidate`, `Issue` | `NamedTuple` | `(era, tier, evidence)` and `(code, message)` |
+| `HashKind` | `Literal["sha1", "chd_rawsha1", "md5", "crc32"]` | `ClassifyResult.hash_kind`'s value space |
+| `tier_for_confidence` | `(confidence) -> Tier` | The confidence to `Tier` mapping |
 
 ## Supported platforms / eras
 

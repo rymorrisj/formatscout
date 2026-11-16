@@ -2,10 +2,13 @@ import logging
 import struct
 import tomllib
 from pathlib import Path
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
 
 from ..constants import ISO_LOGICAL_SECTOR_BYTES, ROOT_DIR_READ_CAP_BYTES
 from ..iso9660_dir import iter_dir_records
+
+if TYPE_CHECKING:
+    from ..result import Method
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,13 @@ _MODE2_DATA_OFFSET = 24
 
 with _TOML_PATH.open("rb") as _f:
     _RAW = tomllib.load(_f)
+
+
+# The two reasons detect_from_magic() returns when the generic CD-ROM sync
+# signature was resolved through SYSTEM.CNF rather than by a platform magic.
+# magic_tags() keys on these exact strings.
+_SYSTEM_CNF_PS2_REASON = "CD-ROM sector sync matched; SYSTEM.CNF BOOT2 key indicates PS2"
+_SYSTEM_CNF_PS1_REASON = "CD-ROM sector sync matched; SYSTEM.CNF BOOT key indicates PS1"
 
 
 def _parse_magic(hex_str: str) -> bytes:
@@ -162,9 +172,9 @@ def detect_from_magic(path: Path, extension: str) -> tuple[str | None, str]:
                     if sig["era"] == "cdrom_sync_ambiguous":
                         resolved = _resolve_ps_generation(path)
                         if resolved == "ps2":
-                            return "ps2", "CD-ROM sector sync matched; SYSTEM.CNF BOOT2 key indicates PS2"
+                            return "ps2", _SYSTEM_CNF_PS2_REASON
                         if resolved == "ps1":
-                            return "ps1", "CD-ROM sector sync matched; SYSTEM.CNF BOOT key indicates PS1"
+                            return "ps1", _SYSTEM_CNF_PS1_REASON
                         # "unknown": the sync pattern is a generic Mode 2 marker,
                         # not a match. continue, not return: a later .bin
                         # signature (Dreamcast, N64, NES) still needs a chance
@@ -182,3 +192,25 @@ def detect_from_magic(path: Path, extension: str) -> tuple[str | None, str]:
         # no-match does not.
         logger.debug("Failed to read %s while matching magic signatures: %s", path, exc)
         return None, ""
+
+
+def magic_tags(reason: str) -> tuple["Method", bool]:
+    """(method, authoritative) for a detect_from_magic() hit, given its reason.
+
+    A hit resolved through SYSTEM.CNF (the generic Mode 2 sync pattern plus
+    the BOOT/BOOT2 key) is Method.SYSTEM_CNF and not authoritative: the sync
+    pattern is not PlayStation-specific and any readable SYSTEM.CNF without
+    BOOT2 is reported as PS1. Every other hit is a platform-specific
+    signature (Dreamcast IP.BIN, N64, iNES) and is authoritative.
+
+    Callers pass the reason exactly as detect_from_magic() returned it,
+    before adding any text of their own.
+    """
+    # Imported here, not at module level, so this module's import-time
+    # dependencies stay constants + iso9660_dir only (test_magic_detect.py
+    # imports an isolated copy of it to test TOML parsing at import time).
+    from ..result import Method
+
+    if reason in (_SYSTEM_CNF_PS2_REASON, _SYSTEM_CNF_PS1_REASON):
+        return Method.SYSTEM_CNF, False
+    return Method.MAGIC, True

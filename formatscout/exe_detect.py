@@ -1,7 +1,7 @@
 import struct
 from pathlib import Path
 
-from .result import ScanResult, null_scan_result
+from .result import Method, ScanResult, Status, null_scan_result
 
 
 def _classify_pe_header(header: bytes) -> tuple[str | None, float, str, int | None]:
@@ -46,6 +46,12 @@ def _classify_pe_header(header: bytes) -> tuple[str | None, float, str, int | No
 
 
 def detect_exe(exe_path: Path) -> ScanResult:
+    """Tier 3 PE/MZ classification of a .exe file.
+
+    Never authoritative: an MZ header alone does not prove DOS (an NE or LE
+    executable lands there too), and MajorOperatingSystemVersion is only a
+    linker setting, so the winxp/win98 split is a guess.
+    """
     try:
         with exe_path.open("rb") as fh:
             header = fh.read(4096)
@@ -56,21 +62,25 @@ def detect_exe(exe_path: Path) -> ScanResult:
             return ScanResult(
                 title=None, platform=None, era=era, confidence=confidence,
                 reason="MZ header present, too short for a PE offset, DOS executable",
+                method=Method.PE_HEADER, authoritative=False, evidence=("mz_too_short_for_pe",),
             )
         if branch == "no_pe_signature":
             return ScanResult(
                 title=None, platform=None, era=era, confidence=confidence,
                 reason="MZ header present, no PE signature, DOS executable",
+                method=Method.PE_HEADER, authoritative=False, evidence=("mz_no_pe_signature",),
             )
         if branch == "era_match":
             label = "Windows XP era executable" if era == "winxp" else "Windows 9x era executable"
             return ScanResult(
                 title=None, platform=None, era=era, confidence=confidence,
                 reason=f"PE MajorOSVersion={major_os}, {label}",
+                method=Method.PE_HEADER, authoritative=False, evidence=("pe_major_os_version",),
             )
         return null_scan_result()
     except Exception as exc:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
             reason=f"detection error reading PE header: {exc}",
+            status=Status.ERROR, method=Method.NONE,
         )

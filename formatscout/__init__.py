@@ -1,7 +1,20 @@
 from .classify import classify
 from .detector import detect
 from .hashing.hash_lookup import hash_file
-from .result import ClassifyResult, Era, HashFileResult, ScanResult, VerifyResult
+from .result import (
+    Candidate,
+    ClassifyResult,
+    Era,
+    HashFileResult,
+    HashKind,
+    Issue,
+    Method,
+    ScanResult,
+    Status,
+    Tier,
+    VerifyResult,
+    tier_for_confidence,
+)
 from .validators.chd_validator import extract_embedded_sha1
 from .verify import verify
 
@@ -12,4 +25,5 @@ __version__ = "0.1.4"
 __all__ = [
     "detect", "ScanResult", "verify", "VerifyResult", "classify", "ClassifyResult",
     "hash_file", "HashFileResult", "extract_embedded_sha1", "Era",
+    "Status", "Method", "Tier", "Candidate", "Issue", "HashKind", "tier_for_confidence",
 ]

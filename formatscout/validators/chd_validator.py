@@ -3,7 +3,7 @@ import struct
 from pathlib import Path
 
 from ..constants import CD_SIZE_THRESHOLD_BYTES
-from ..result import ScanResult
+from ..result import Issue, Method, ScanResult, Status
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,10 @@ def detect_chd_platform(path: Path) -> ScanResult:
                 header's logicalbytes size (CD-sized → PS1, DVD-sized → PS2)
     Returns a zero-confidence result on any error or unrecognised metadata.
     Never raises.
+
+    Never authoritative: CHGD means a GD-ROM track, which Sega NAOMI GD-ROM
+    images share with Dreamcast, and the CHTR/CHT2 split is a size guess.
+    A valid CHD header with no platform tag is "container_only".
     """
     try:
         with path.open("rb") as fh:
@@ -77,6 +81,7 @@ def detect_chd_platform(path: Path) -> ScanResult:
                 return ScanResult(
                     title=None, platform=None, era=None, confidence=0.0,
                     reason="CHD magic bytes not found, not a valid CHD file",
+                    status=Status.NO_SIGNAL, method=Method.NONE,
                 )
 
             fh.seek(_META_OFFSET_POS)
@@ -85,6 +90,9 @@ def detect_chd_platform(path: Path) -> ScanResult:
                 return ScanResult(
                     title=None, platform=None, era=None, confidence=0.0,
                     reason="CHD header truncated, could not read metadata offset",
+                    status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container="chd",
+                    evidence=("chd_magic",),
+                    issues=(Issue("chd_header_truncated", "CHD header ends before the metadata offset field"),),
                 )
             meta_offset = struct.unpack(">Q", raw)[0]
 
@@ -114,6 +122,8 @@ def detect_chd_platform(path: Path) -> ScanResult:
                     return ScanResult(
                         title=None, platform=None, era="dreamcast", confidence=0.85,
                         reason="CHD metadata CHGD tag indicates GD-ROM (Dreamcast)",
+                        method=Method.STRUCTURAL, authoritative=False, container="chd",
+                        evidence=("chd_meta_chgd",),
                     )
 
                 if tag in (_META_CHTR, _META_CHT2):
@@ -137,6 +147,8 @@ def detect_chd_platform(path: Path) -> ScanResult:
                             "not authoritative: CHTR/CHT2 tag + logical size is a heuristic, not "
                             "a hash match; confirm via hash index or manual verification",
                         ],
+                        method=Method.SIZE_HEURISTIC, authoritative=False, container="chd",
+                        evidence=("chd_meta_chtr_cht2", "chd_logical_size"),
                     )
 
                 meta_offset = next_offset
@@ -145,10 +157,13 @@ def detect_chd_platform(path: Path) -> ScanResult:
             title=None, platform=None, era=None, confidence=0.0,
             reason="CHD container detected but no recognised platform metadata tag found",
             warnings=["no CHGD/CHTR/CHT2 tag in metadata chain"],
+            status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container="chd",
+            evidence=("chd_magic",),
         )
     except (OSError, struct.error) as exc:
         logger.debug("Failed to read CHD metadata from %s: %s", path, exc)
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
             reason=f"CHD read error: {exc}",
+            status=Status.ERROR, method=Method.NONE,
         )

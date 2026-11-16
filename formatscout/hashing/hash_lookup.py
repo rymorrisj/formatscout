@@ -12,7 +12,7 @@ import zlib
 from pathlib import Path
 from typing import Any
 
-from ..result import HashFileResult, ScanResult
+from ..result import HashFileResult, Method, ScanResult, Status
 from ..validators.chd_validator import extract_embedded_sha1
 
 log = logging.getLogger(__name__)
@@ -437,6 +437,11 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
                    A hit is a hint the file is probably the indexed
                    title, never proof. Do not use this tier to
                    authenticate a file or to make an unsafe decision.
+
+    Result tags (see _hit()): sha1, md5 and the CHD embedded rawsha1 are
+    authoritative when the entry has an era; crc32 never is. An entry
+    without an era yields status "unsupported" (detect() falls through on
+    those).
     """
     index, md5_index, crc32_index = load_index(index_path)
     if not index:
@@ -453,47 +458,58 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
         entry = index.get(embedded_sha1)
         if entry is None:
             return None
-        return ScanResult(
-            title=entry.get("title"),
-            platform=entry.get("platform"),
-            era=entry.get("era"),
-            confidence=1.0,
-            reason=f"sha1 match (CHD embedded rawsha1): {embedded_sha1}",
+        return _hit(
+            entry, 1.0, f"sha1 match (CHD embedded rawsha1): {embedded_sha1}",
+            Method.CHD_HEADER_CLAIM, proof=True, container="chd", evidence=("chd_embedded_rawsha1",),
         )
 
     hashes = hash_file(path)
 
     entry = index.get(hashes.sha1)
     if entry is not None:
-        return ScanResult(
-            title=entry.get("title"),
-            platform=entry.get("platform"),
-            era=entry.get("era"),
-            confidence=1.0,
-            reason=f"sha1 match: {hashes.sha1}",
-        )
+        return _hit(entry, 1.0, f"sha1 match: {hashes.sha1}", Method.HASH_SHA1, proof=True)
 
     entry = md5_index.get(hashes.md5)
     if entry is not None:
-        return ScanResult(
-            title=entry.get("title"),
-            platform=entry.get("platform"),
-            era=entry.get("era"),
-            confidence=0.85,
-            reason=f"md5 match: {hashes.md5}",
-        )
+        return _hit(entry, 0.85, f"md5 match: {hashes.md5}", Method.HASH_MD5, proof=True)
 
     entry = crc32_index.get(hashes.crc32)
     if entry is not None:
-        return ScanResult(
-            title=entry.get("title"),
-            platform=entry.get("platform"),
-            era=entry.get("era"),
-            confidence=0.75,
-            reason=f"crc32 match: {hashes.crc32}",
-        )
+        return _hit(entry, 0.75, f"crc32 match: {hashes.crc32}", Method.HASH_CRC32, proof=False)
 
     return None
+
+
+def _hit(
+    entry: dict, confidence: float, reason: str, method: Method, *,
+    proof: bool, container: str | None = None, evidence: tuple[str, ...] = (),
+) -> ScanResult:
+    """ScanResult for an index hit on *entry*.
+
+    era is the entry's own value, unchanged. *proof* says whether this hash
+    kind identifies the file (sha1, md5, CHD rawsha1) or only hints at it
+    (crc32); it makes the result authoritative only when the entry has an
+    era. An era-less entry (e.g. the unmapped "IBM - PC compatible" bucket)
+    names a platform this package does not map to an era: "unsupported".
+    """
+    era = entry.get("era")
+    authoritative = proof and era is not None
+    if era is None:
+        status = Status.UNSUPPORTED
+    else:
+        status = Status.IDENTIFIED if authoritative else Status.GUESS
+    return ScanResult(
+        title=entry.get("title"),
+        platform=entry.get("platform"),
+        era=era,
+        confidence=confidence,
+        reason=reason,
+        status=status,
+        method=method,
+        authoritative=authoritative,
+        container=container,
+        evidence=evidence,
+    )
 
 
 def _sha256_file(path: Path) -> str:

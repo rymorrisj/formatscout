@@ -13,8 +13,8 @@ from .iso9660_dir import iter_dir_records
 from .utils.pointer_file import read_capped_lines
 from .utils.safe_path import rejection_warning, resolve_pointer
 from .xbox_image import detect_xbox_image_type
-from .magic.magic_detect import detect_from_magic
-from .result import ScanResult, null_scan_result
+from .magic.magic_detect import detect_from_magic, magic_tags
+from .result import Candidate, Issue, Method, ScanResult, Status, null_scan_result, tier_for_confidence
 from .validators import bin_validator
 from .validators import chd_validator
 
@@ -29,7 +29,11 @@ _DOS_PUBLISHERS = frozenset({
 def detect_iso(path: Path) -> ScanResult:
     era, reason = detect_from_magic(path, "iso")
     if era is not None:
-        return ScanResult(title=None, platform=None, era=era, confidence=0.9, reason=reason)
+        method, authoritative = magic_tags(reason)
+        return ScanResult(
+            title=None, platform=None, era=era, confidence=0.9, reason=reason,
+            method=method, authoritative=authoritative,
+        )
 
     pvd = detect_from_pvd(path)
     if pvd.era is not None:
@@ -40,12 +44,16 @@ def detect_iso(path: Path) -> ScanResult:
         return ScanResult(
             title=None, platform=None, era="xbox", confidence=0.9,
             reason="XDVDFS magic 'MICROSOFT*XBOX*MEDIA' found at 0x10000, Original Xbox disc image",
+            # Not authoritative: Xbox 360 discs use the same XDVDFS magic.
+            method=Method.MAGIC, authoritative=False, container="xdvdfs", evidence=("xdvdfs_magic",),
         )
     if xbox_kind == "dvd_rip":
         return ScanResult(
             title=None, platform=None, era="xbox", confidence=0.9,
             reason="ISO 9660 magic found but file exceeds the xISO size threshold, raw Xbox DVD rip",
             requires_extraction=True,
+            method=Method.SIZE_HEURISTIC, authoritative=False, container="iso9660",
+            evidence=("iso9660_magic", "size_over_dvd_threshold"),
         )
 
     # "iso9660" means the ISO 9660 magic was found and the file is not an Xbox
@@ -68,6 +76,7 @@ def detect_cue(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> S
     pointer_warnings: list[str] = []
     result = _detect_cue(path, dir_cache, pointer_warnings)
     result.warnings.extend(pointer_warnings)
+    result.issues += tuple(Issue("pointer_rejected", message) for message in pointer_warnings)
     return result
 
 
@@ -92,10 +101,15 @@ def _detect_cue(
             title=None, platform=None, era=None, confidence=0.0,
             reason="no .bin file found for .cue sheet",
             warnings=[f"could not locate the .bin file referenced by {path.name}"],
+            status=Status.NO_SIGNAL, method=Method.NONE,
         )
     era, reason = detect_from_magic(bin_path, "bin")
     if era is not None:
-        return ScanResult(title=None, platform=None, era=era, confidence=0.9, reason=reason)
+        method, authoritative = magic_tags(reason)
+        return ScanResult(
+            title=None, platform=None, era=era, confidence=0.9, reason=reason,
+            method=method, authoritative=authoritative,
+        )
     pvd = detect_from_pvd(bin_path)
     if pvd.era is not None:
         return pvd
@@ -140,6 +154,8 @@ def detect_from_pvd(iso_path: Path) -> ScanResult:
             return ScanResult(
                 title=None, platform=None, era="ps3", confidence=0.9,
                 reason="ISO 9660 root directory contains PS3_DISC.SFB, PS3 disc image",
+                # Not authoritative: a file name only, PS3_DISC.SFB's contents are not checked.
+                method=Method.STRUCTURAL, authoritative=False, evidence=("pvd_root_ps3_disc_sfb",),
             )
 
         xbe_result = _xbe_result_from_names(root_names)
@@ -156,6 +172,7 @@ def detect_from_pvd(iso_path: Path) -> ScanResult:
                 return ScanResult(
                     title=None, platform=None, era=era, confidence=0.75,
                     reason=f"ISO volume label contains '{vol_id}'",
+                    method=Method.STRUCTURAL, authoritative=False, evidence=("pvd_volume_label_keyword",),
                 )
 
         for meta, label in ((publisher, "publisher"), (preparer, "preparer")):
@@ -164,6 +181,7 @@ def detect_from_pvd(iso_path: Path) -> ScanResult:
                 return ScanResult(
                     title=None, platform=None, era="dos", confidence=0.7,
                     reason=f"ISO {label} '{meta[:40]}' matches known DOS publisher '{matched}'",
+                    method=Method.STRUCTURAL, authoritative=False, evidence=(f"pvd_{label}_dos_publisher",),
                 )
 
         ps_prefixes = ("SLUS", "SCES", "SCUS", "SLPS", "SCPS", "SLES", "SLEJ")
@@ -179,10 +197,14 @@ def detect_from_pvd(iso_path: Path) -> ScanResult:
                 return ScanResult(
                     title=None, platform=None, era="ps2", confidence=0.75,
                     reason=f"ISO volume label '{vol_id}' matches PS2 pattern (DVD size)",
+                    method=Method.SIZE_HEURISTIC, authoritative=False,
+                    evidence=("pvd_ps_serial_label", "size_over_dvd5"),
                 )
             return ScanResult(
                 title=None, platform=None, era="ps1", confidence=0.75,
                 reason=f"ISO volume label '{vol_id}', publisher '{publisher[:30]}' match PS1",
+                method=Method.STRUCTURAL, authoritative=False,
+                evidence=("pvd_ps_serial_label",) if vol_starts_ps else ("pvd_sony_cdrom",),
             )
 
         return _null
@@ -191,6 +213,7 @@ def detect_from_pvd(iso_path: Path) -> ScanResult:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
             reason=f"ISO PVD read error: {exc}",
+            status=Status.ERROR, method=Method.NONE,
         )
 
 
@@ -228,6 +251,7 @@ def _xbe_result_from_names(names: list[str]) -> ScanResult:
             return ScanResult(
                 title=None, platform=None, era="xbox", confidence=0.8,
                 reason="ISO filesystem contains .xbe, Original Xbox executable",
+                method=Method.STRUCTURAL, authoritative=False, evidence=("pvd_root_xbe",),
             )
     return _null
 
@@ -253,26 +277,47 @@ def _iso_size_fallback(path: Path, *, iso9660_confirmed: bool = False) -> ScanRe
     try:
         size = path.stat().st_size
     except OSError:
-        return ScanResult(title=None, platform=None, era=None, confidence=0.0, reason="no signal found")
+        return ScanResult(
+            title=None, platform=None, era=None, confidence=0.0, reason="no signal found",
+            status=Status.NO_SIGNAL, method=Method.NONE,
+        )
+    # A confirmed ISO 9660 image with no platform signal is container_only;
+    # an unconfirmed small file has nothing to go on.
+    if iso9660_confirmed:
+        status, method, container, evidence = Status.CONTAINER_ONLY, Method.STRUCTURAL, "iso9660", ("iso9660_magic",)
+    else:
+        status, method, container, evidence = Status.NO_SIGNAL, Method.NONE, None, ()
     if size > DVD_SIZE_THRESHOLD_BYTES:
+        # The size names two candidates. Reached only unconfirmed in
+        # detect_iso(): a confirmed ISO 9660 image this size is a dvd_rip.
+        size_evidence = evidence + ("size_over_dvd_threshold",)
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.2,
             reason=f"ISO exceeds 4 GB, {signal}",
             warnings=["could be PS2 or Xbox OG, please select era manually"],
+            status=Status.AMBIGUOUS, method=Method.SIZE_HEURISTIC, container=container, evidence=size_evidence,
+            candidates=tuple(
+                Candidate(era, tier_for_confidence(0.2), size_evidence) for era in ("ps2", "xbox")
+            ),
         )
     if size < CD_SIZE_THRESHOLD_BYTES:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.2,
             reason=f"ISO under 800 MB, {signal}",
             warnings=["era ambiguous, please select era manually"],
+            status=status, method=method, container=container, evidence=evidence,
         )
     if iso9660_confirmed:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.2,
             reason="ISO 9660 magic confirmed but no platform signal, size is inconclusive",
             warnings=["valid ISO 9660 disc image with no platform signal, please select era manually"],
+            status=status, method=method, container=container, evidence=evidence,
         )
-    return ScanResult(title=None, platform=None, era=None, confidence=0.0, reason="no signal found")
+    return ScanResult(
+        title=None, platform=None, era=None, confidence=0.0, reason="no signal found",
+        status=Status.NO_SIGNAL, method=Method.NONE,
+    )
 
 
 def _cue_bin_path(cue_path: Path, warnings: list[str] | None = None) -> Path | None:

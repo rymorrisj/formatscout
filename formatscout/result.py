@@ -1,5 +1,7 @@
-from dataclasses import dataclass, field
-from typing import Literal
+import math
+from dataclasses import KW_ONLY, dataclass, field
+from enum import StrEnum
+from typing import Literal, NamedTuple
 
 # The full era vocabulary any detection tier can assign to ScanResult.era.
 # Confirmed by grepping every `era=` assignment package-wide, not just
@@ -15,6 +17,122 @@ Era = Literal[
     "n64", "nes", "snes",
     "dos", "win95", "win98", "winxp",
 ]
+
+
+class Status(StrEnum):
+    """How a ScanResult should be interpreted, see ScanResult.status.
+
+    A StrEnum, so each member compares equal to its plain string value
+    (Status.GUESS == "guess").
+
+    identified: era is set and authoritative (proof, see ScanResult).
+    guess: TRANSITIONAL. era is set but not authoritative (size thresholds,
+        extension-only shortcuts, directory heuristics, PE OS-version
+        guesses, ...). It exists only because era still carries guesses
+        today, and is to be removed once era stops carrying them.
+    ambiguous: era is None, but the signal narrows the answer to a few
+        candidate eras (see ScanResult.candidates).
+    container_only: era is None. The container or filesystem was confirmed
+        (ISO 9660, CHD, a cue/bin pair), but nothing named a platform.
+    unsupported: era is None. The input was recognised as something this
+        package does not map to an era (.nds, an index entry with no era, a
+        path that is neither file nor directory).
+    no_signal: era is None and nothing usable was found.
+    error: era is None because the input could not be examined (missing
+        path, read or parse error, the detect() catch-all).
+    """
+    IDENTIFIED = "identified"
+    GUESS = "guess"
+    AMBIGUOUS = "ambiguous"
+    CONTAINER_ONLY = "container_only"
+    UNSUPPORTED = "unsupported"
+    NO_SIGNAL = "no_signal"
+    ERROR = "error"
+
+
+class Method(StrEnum):
+    """Which rule produced a ScanResult, see ScanResult.method.
+
+    hash_sha1/hash_md5/hash_crc32: hash-index hit on the file's own bytes.
+    chd_header_claim: hash-index hit on the rawsha1 a CHD header claims for
+        its raw data (read from the header, never checked against the hunks).
+    magic: fixed-offset signature bytes (magic_signatures.toml, XDVDFS).
+    structural: parsed structure (ISO 9660 PVD/root directory, CHD metadata
+        chain, cue TRACK type).
+    system_cnf: PlayStation SYSTEM.CNF BOOT/BOOT2 key.
+    directory_marker: marker file or folder names in a directory tree.
+    pe_header: MZ/PE header fields of an executable.
+    extension: file extension alone.
+    size_heuristic: a file or logical size threshold decided the result.
+    none: no rule produced a signal (no_signal and error results).
+    """
+    HASH_SHA1 = "hash_sha1"
+    HASH_MD5 = "hash_md5"
+    HASH_CRC32 = "hash_crc32"
+    CHD_HEADER_CLAIM = "chd_header_claim"
+    MAGIC = "magic"
+    STRUCTURAL = "structural"
+    SYSTEM_CNF = "system_cnf"
+    DIRECTORY_MARKER = "directory_marker"
+    PE_HEADER = "pe_header"
+    EXTENSION = "extension"
+    SIZE_HEURISTIC = "size_heuristic"
+    NONE = "none"
+
+
+class Tier(StrEnum):
+    """Coarse confidence band, used by ScanResult.candidates. The float
+    ScanResult.confidence is unchanged; tier_for_confidence() maps one to the
+    other."""
+    CERTAIN = "certain"
+    STRONG = "strong"
+    MODERATE = "moderate"
+    WEAK = "weak"
+    NONE = "none"
+
+
+# Lower bounds of each Tier, highest first. The single definition of the
+# confidence -> Tier mapping (README "Result contract" documents the same
+# ranges): certain 1.0, strong [0.85, 1.0), moderate [0.5, 0.85),
+# weak (0.0, 0.5), none 0.0 or below (and NaN).
+_TIER_FLOORS: tuple[tuple[float, Tier], ...] = (
+    (1.0, Tier.CERTAIN),
+    (0.85, Tier.STRONG),
+    (0.5, Tier.MODERATE),
+)
+
+
+def tier_for_confidence(confidence: float) -> Tier:
+    """Map a ScanResult.confidence float to its Tier band.
+
+    0.0, negatives and NaN are Tier.NONE; 1.0 and above are Tier.CERTAIN.
+    """
+    if math.isnan(confidence) or confidence <= 0.0:
+        return Tier.NONE
+    for floor, tier in _TIER_FLOORS:
+        if confidence >= floor:
+            return tier
+    return Tier.WEAK
+
+
+class Candidate(NamedTuple):
+    """One era an ambiguous result could be: (era, tier, evidence_codes)."""
+    era: str
+    tier: Tier
+    evidence: tuple[str, ...] = ()
+
+
+class Issue(NamedTuple):
+    """A machine-readable problem attached to a result: (code, message).
+    Complements the free-text warnings list, which is unchanged."""
+    code: str
+    message: str
+
+
+_ERA_STATUSES = frozenset({Status.IDENTIFIED, Status.GUESS})
+
+# ClassifyResult.hash_kind's value space.
+HashKind = Literal["sha1", "chd_rawsha1", "md5", "crc32"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -41,6 +159,37 @@ class ScanResult:
         the xISO size threshold). True means the caller must run extract-xiso
         on it before launch, mirrors requires_install's "not directly usable
         yet" role but for a format-conversion step instead of an install step.
+
+    The fields above are unchanged; era is still populated exactly as before
+    (including guesses). The keyword-only fields below say how to read it:
+
+    status: a Status. Use this, not "era is None", to decide what a result
+        means. Left out, it is derived: identified when era is set and
+        authoritative is True, guess when era is set otherwise, no_signal when
+        era is None. "guess" is TRANSITIONAL: it exists only because era still
+        carries non-authoritative answers, and will be removed once era stops
+        carrying guesses.
+    method: a Method naming the rule that produced the result (none when no
+        rule produced a signal).
+    authoritative: True only when era was determined from proof (a sha1/md5
+        index hit, a CHD header rawsha1 index hit, a platform-unique magic
+        signature). Always False when era is None.
+    container: the confirmed container/filesystem, when one was confirmed:
+        "iso9660", "xdvdfs", "chd" or "bin_cue". None otherwise.
+    candidates: for ambiguous results, the eras the signal narrows to, as
+        Candidate(era, tier, evidence_codes) tuples.
+    evidence: short stable codes for the specific signals behind the result
+        (e.g. "pvd_volume_label_keyword"), finer-grained than method.
+    issues: Issue(code, message) tuples for problems worth acting on (index
+        unavailable, rejected pointer, ...). warnings is still populated as
+        before; issues do not replace it.
+    platform_hint: a human-readable platform the signal points at when the
+        platform field is not set (e.g. "Nintendo DS" for an unsupported .nds).
+
+    __post_init__ coerces plain strings and tuples to the enum/NamedTuple
+    types and raises ValueError for contradictory combinations (an era-less
+    result marked authoritative or identified/guess, an era-carrying result
+    with any other status, or a status that disagrees with authoritative).
     """
     title: str | None
     platform: str | None
@@ -50,6 +199,42 @@ class ScanResult:
     requires_install: bool = False
     requires_extraction: bool = False
     warnings: list[str] = field(default_factory=list)
+    _: KW_ONLY
+    # None only as a constructor default: __post_init__ always replaces it
+    # with the derived Status, so a constructed ScanResult never holds None.
+    status: Status = None  # type: ignore[assignment]
+    method: Method = Method.NONE
+    authoritative: bool = False
+    container: str | None = None
+    candidates: tuple[Candidate, ...] = ()
+    evidence: tuple[str, ...] = ()
+    issues: tuple[Issue, ...] = ()
+    platform_hint: str | None = None
+
+    def __post_init__(self) -> None:
+        self.method = Method(self.method)
+        self.authoritative = bool(self.authoritative)
+        self.evidence = tuple(self.evidence)
+        self.issues = tuple(Issue(*issue) for issue in self.issues)
+        self.candidates = tuple(
+            Candidate(c[0], Tier(c[1]), tuple(c[2]) if len(c) > 2 else ()) for c in self.candidates
+        )
+        has_era = self.era is not None
+        if self.status is None:
+            if not has_era:
+                self.status = Status.NO_SIGNAL
+            elif self.authoritative:
+                self.status = Status.IDENTIFIED
+            else:
+                self.status = Status.GUESS
+        else:
+            self.status = Status(self.status)
+        if not has_era and self.authoritative:
+            raise ValueError("authoritative=True requires an era")
+        if has_era != (self.status in _ERA_STATUSES):
+            raise ValueError(f"status {self.status!r} does not fit era {self.era!r}")
+        if has_era and (self.status is Status.IDENTIFIED) != self.authoritative:
+            raise ValueError(f"status {self.status!r} does not fit authoritative={self.authoritative}")
 
 
 def null_scan_result() -> ScanResult:
@@ -131,9 +316,31 @@ class ClassifyResult:
     matched_title/similarity are populated only for "mismatch": the specific
     index title the fuzzy match landed on and its similarity ratio, useful
     for logging, not required for handling the status itself.
+
+    Keyword-only, defaulted additions (statuses and the fields above are
+    unchanged):
+
+    matched_era: the era of the index entry a hash matched ("verified",
+        "caution"), or, for "mismatch", the era the title search was scoped
+        to (every candidate title carries it). None otherwise, and None when
+        the matched entry's era is missing or not a string.
+    hash_kind: which hash matched: "sha1" (the file's own sha1),
+        "chd_rawsha1" (a CHD header's embedded rawsha1), "md5" or "crc32".
+        None when no hash matched.
+    issues: Issue(code, message) tuples: "hash_failed" for "unchecked",
+        "index_missing" when a missing custom index file was treated as
+        empty, "chd_rawsha1_missing" when a .chd had no usable embedded
+        rawsha1 and its raw file sha1 was looked up instead.
     """
     status: Literal["verified", "caution", "mismatch", "not_in_index", "unchecked"]
     computed_sha1: str | None
     matched_title: str | None
     similarity: float | None
     reason: str
+    _: KW_ONLY
+    matched_era: str | None = None
+    hash_kind: HashKind | None = None
+    issues: tuple[Issue, ...] = ()
+
+    def __post_init__(self) -> None:
+        self.issues = tuple(Issue(*issue) for issue in self.issues)
