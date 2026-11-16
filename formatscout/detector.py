@@ -46,6 +46,24 @@ def _compute_requires_install(path: Path, era: str | None) -> bool:
     return False
 
 
+# ── Index-failure warning ────────────────────────────────────────────────────
+
+_MAX_WARNING_REASON_CHARS = 120
+
+
+def _index_unavailable_warning(exc: Exception) -> str:
+    """One-line ScanResult warning for a hash-tier failure caused by the index
+    (not by the input file): offline mode, download backoff or failure, or an
+    oversized/corrupt index."""
+    # Control characters (newlines, ESC, ...) become spaces so a message that
+    # embeds server or OS text cannot inject terminal escapes or extra lines.
+    printable = "".join(ch if ch.isprintable() else " " for ch in str(exc))
+    reason = " ".join(printable.split())
+    if len(reason) > _MAX_WARNING_REASON_CHARS:
+        reason = reason[:_MAX_WARNING_REASON_CHARS - 3] + "..."
+    return f"hash index unavailable: {reason}; heuristics only"
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> ScanResult:
@@ -79,15 +97,28 @@ def _detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> Scan
     # Directories are a first-class input (Tier 4), not a hashable file, so
     # skip this tier for them entirely rather than reaching hash_file()'s
     # path.open("rb") only to fail.
+    index_warning: str | None = None
     if path.is_file():
         try:
             result = _hash_lookup.lookup(path, _INDEX_PATH)
             if result is not None and result.era is not None:
                 result.requires_install = _compute_requires_install(path, result.era)
                 return result
+        except _hash_lookup._IndexUnavailableError as exc:
+            # The index itself could not be obtained or trusted: surface it on
+            # the result so callers can tell "no hash match" from "hash tier
+            # did not run". The warning is attached once, after the heuristic
+            # tiers have produced their result.
+            log.warning("Hash index unavailable for '%s': %s", path, exc, exc_info=True)
+            index_warning = _index_unavailable_warning(exc)
         except Exception as exc:
+            # Quiet by design: FileNotFoundError for an index path that does
+            # not exist (only reachable with a custom or patched index path,
+            # the default is downloaded instead) means "no index built", and
+            # the same exception type can also come from the input file
+            # vanishing mid-scan, which is not an index problem. Everything
+            # else here is an input-file read error.
             log.warning("Hash lookup failed for '%s': %s", path, exc, exc_info=True)
-            # empty or missing index, continue to signal detection
 
     if path.is_file():
         result = _detect_file(path, dir_cache)
@@ -100,6 +131,8 @@ def _detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> Scan
         )
 
     result.requires_install = _compute_requires_install(path, result.era)
+    if index_warning is not None and index_warning not in result.warnings:
+        result.warnings.append(index_warning)
     return result
 
 

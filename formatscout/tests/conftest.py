@@ -10,6 +10,9 @@ Why each patch exists:
   wraps its body in `except Exception`, which would swallow that error, so
   the autouse fixture also fails the test at teardown if any attempt was
   recorded and not explicitly cleared (test_network_guard.py clears its own).
+  Note: hash_lookup downloads via urllib.request.build_opener().open, which
+  does not go through urllib.request.urlopen, so only the socket patches cover
+  it; tests of the download patch hash_lookup._open_index_url instead.
 * hash_lookup._CACHE_DIR/_DEFAULT_INDEX_PATH/_fetch_default_index -> a
   nonexistent tmp path and a raising stub, so no code path can download.
 * detector/classify/verify._INDEX_PATH are bound to the real home at import

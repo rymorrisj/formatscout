@@ -16,6 +16,12 @@ def classify(
     each status means. Establishes a classification from scratch (ingest, or
     a from-scratch re-check), unlike verify(), which compares against an
     already-known expected_sha1.
+
+    Only an OSError while hashing the file becomes status="unchecked", and
+    only a missing custom index file (FileNotFoundError) is treated as an
+    empty index. Index download errors still escape: a failed or suppressed
+    download (offline mode, backoff) or an oversized/corrupt index raises an
+    OSError subclass from the index loader instead of returning a result.
     """
     try:
         hashes = _hash_lookup.hash_file(path)
