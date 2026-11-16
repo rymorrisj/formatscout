@@ -5,6 +5,59 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-16
+
+### Added
+- `ensure_index(path=None, *, force=False, timeout=None, max_bytes=None)`
+  returns the path of a usable hash index, downloading it first when the
+  default cache has none. For any other path it only validates the file. With
+  `force=True` it re-downloads (ignoring the failure backoff, never offline
+  mode); the new file is verified before anything is touched, a pristine copy
+  of an earlier download is replaced, and any other file at the cache path is
+  moved aside to `.corrupt` / `.corrupt.N` rather than overwritten.
+- Public `IndexUnavailable` (an `OSError`) and `IndexIntegrityError` (a
+  subclass: sha256 mismatch, corrupt or oversized index). The private 0.1.3 and
+  0.1.4 exception names remain as aliases.
+- Keyword-only `index_path=` on `detect()`, `classify()` and `verify()`, and an
+  optional index path on the title matcher. Resolution order: the argument,
+  then `FORMATSCOUT_INDEX_PATH`, then `~/.formatscout/hash_index.json`. Only
+  the default cache is downloaded, pin-checked or quarantined; every other path
+  is user-supplied and a sidecar next to it is ignored.
+- Keyword-only `strict=True` on `classify()` and `verify()` to raise
+  `IndexUnavailable` instead of returning `unchecked`.
+- `VerifyResult` gains the status `unchecked` and a keyword-only `issues`.
+- `build_index` prints the path the runtime reads and how to use the result
+  (`--output`, `FORMATSCOUT_INDEX_PATH` or `index_path=`).
+- Result contract on `ScanResult`: keyword-only, defaulted `status`, `method`,
+  `authoritative`, `container`, `candidates`, `evidence`, `issues` and
+  `platform_hint`; `ClassifyResult` gains `matched_era`, `hash_kind` and
+  `issues`. New exports `Status`, `Method`, `Tier`, `Candidate`, `Issue`,
+  `HashKind` and `tier_for_confidence`. A `ScanResult` with contradictory
+  values raises `ValueError`. See the README's Result contract section.
+
+### Changed
+- `classify()` and `verify()` no longer raise by default when the index is
+  unavailable (offline mode, backoff, failed download, oversized, corrupt or
+  unreadable index). They return `status="unchecked"` with an
+  `INDEX_UNAVAILABLE` issue and keep `computed_sha1`; pass `strict=True` for
+  the old raising behavior (now `IndexUnavailable`). A missing index file at a
+  custom path is still an empty index.
+- The issue code `index_unavailable` that `detect()` attached is now spelled
+  `INDEX_UNAVAILABLE`, the same code `classify()` and `verify()` use.
+- The home directory is no longer read at import. The default cache path is
+  computed when first needed; if the home directory cannot be determined that
+  is an unavailable index (set `FORMATSCOUT_INDEX_PATH` or pass `index_path=`)
+  instead of a failure at import time.
+- The module-level `_INDEX_PATH`, `_CACHE_DIR` and `_DEFAULT_INDEX_PATH`
+  override hooks now default to `None` (default resolution) instead of a
+  computed path.
+- When `build_index` writes to the default cache path it deletes a stale
+  download sidecar just before moving the new index into place, so a
+  user-built index there is no longer quarantined as a modified download.
+- Implicit download on first use stays the default and is now documented, with
+  `FORMATSCOUT_OFFLINE=1`, `index_path=` and `ensure_index()` as the ways to
+  control it.
+
 ## [0.1.4] - 2026-11-16
 
 ### Fixed

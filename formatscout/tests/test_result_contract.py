@@ -310,7 +310,7 @@ class TestDetectorSites:
         result = detector.detect(_write(tmp_path / "g.bin", fx.NES_HEADER_BLOB))
         _tags(result, Method.MAGIC, Status.IDENTIFIED, True)
         codes = [issue.code for issue in result.issues]
-        assert codes == ["index_unavailable"]
+        assert codes == ["INDEX_UNAVAILABLE"]
         assert result.issues[0].message in result.warnings
 
     def test_hash_hit_through_detect_is_identified(self, tmp_path: Path, monkeypatch):

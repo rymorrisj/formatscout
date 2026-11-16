@@ -121,7 +121,7 @@ else:                              # container_only | unsupported | no_signal | 
 # scan.requires_install, scan.requires_extraction apply whatever the status
 
 result = verify(Path("game.iso"), expected_sha1="...")
-result.status  # "matched" | "mismatched" | "not_in_index"
+result.status  # "matched" | "mismatched" | "not_in_index" | "unchecked"
 
 result = classify(Path("game.iso"), title="Halo", era="xbox")
 result.status  # "verified" | "caution" | "mismatch" | "not_in_index" | "unchecked"
@@ -129,6 +129,8 @@ result.status  # "verified" | "caution" | "mismatch" | "not_in_index" | "uncheck
 hashes = hash_file(Path("game.iso"))
 hashes.sha1, hashes.md5, hashes.crc32
 ```
+
+`detect()`, `classify()` and `verify()` also take a keyword-only `index_path=` to use a specific hash index, and `ensure_index()` fetches or checks the index up front. See [Hash index](#hash-index).
 
 ### Result contract
 
@@ -152,7 +154,7 @@ Other fields, all defaulted:
 - `container`: `iso9660`, `xdvdfs`, `chd` or `bin_cue` when confirmed, else None.
 - `candidates`: `Candidate(era, tier, evidence)` tuples for `ambiguous` results.
 - `evidence`: short stable codes for the specific signals, such as `pvd_volume_label_keyword`.
-- `issues`: `Issue(code, message)` tuples, for example `index_unavailable` (the hash tier did not run), `pointer_rejected`, `unexpected_error`. `warnings` is still filled in as before.
+- `issues`: `Issue(code, message)` tuples, for example `INDEX_UNAVAILABLE` (the hash tier did not run), `pointer_rejected`, `unexpected_error`. `warnings` is still filled in as before.
 - `platform_hint`: a platform the signal points at when `platform` is not set (for example `Nintendo DS` for `.nds`).
 
 `Status`, `Method` and `Tier` are `StrEnum`s, so `scan.status == "guess"` works. Constructing a `ScanResult` with contradictory values (an era-less result marked authoritative, an era with a status other than `identified`/`guess`) raises `ValueError`.
@@ -167,17 +169,19 @@ Other fields, all defaulted:
 | `weak` | above 0.0 to below 0.5 |
 | `none` | 0.0 (or below, or NaN) |
 
-`ClassifyResult` keeps its statuses and existing fields, and adds keyword-only `matched_era` (era of the matched index entry, or the era the title search was scoped to for `mismatch`), `hash_kind` (`sha1`, `chd_rawsha1`, `md5`, `crc32`, or None) and `issues` (`hash_failed`, `index_missing`, `chd_rawsha1_missing`). `matched_title` is still set only for `mismatch`.
+`ClassifyResult` keeps its statuses and existing fields, and adds keyword-only `matched_era` (era of the matched index entry, or the era the title search was scoped to for `mismatch`), `hash_kind` (`sha1`, `chd_rawsha1`, `md5`, `crc32`, or None) and `issues` (`hash_failed`, `INDEX_UNAVAILABLE`, `index_missing`, `chd_rawsha1_missing`). `matched_title` is still set only for `mismatch`. `VerifyResult` gains the status `unchecked` and a keyword-only `issues` (`INDEX_UNAVAILABLE`). See [Hash index](#hash-index) for what `unchecked` means.
 
 ### Public API
 
-Seventeen names are exported from `__init__.py`. Everything else is internal.
+Twenty names are exported from `__init__.py`. Everything else is internal.
 
 | Name | Signature | Notes |
 |---|---|---|
-| `detect` | `(path, dir_cache=None) -> ScanResult` | Main entry point |
-| `verify` | `(path, expected_sha1) -> VerifyResult` | Hash-only re-check against the index |
-| `classify` | `(path, title, era, threshold=0.80) -> ClassifyResult` | Five-state verification, no prior hash needed |
+| `detect` | `(path, dir_cache=None, *, index_path=None) -> ScanResult` | Main entry point |
+| `verify` | `(path, expected_sha1, *, index_path=None, strict=False) -> VerifyResult` | Hash-only re-check against the index |
+| `classify` | `(path, title, era, *, threshold=0.80, index_path=None, strict=False) -> ClassifyResult` | Five-state verification, no prior hash needed |
+| `ensure_index` | `(path=None, *, force=False, timeout=None, max_bytes=None) -> Path` | Fetch or validate the hash index up front, see [Hash index](#hash-index) |
+| `IndexUnavailable`, `IndexIntegrityError` | `OSError` subclasses | Index failures; `IndexIntegrityError` is a subclass of `IndexUnavailable` |
 | `hash_file` | `(path) -> HashFileResult` | sha1/md5/crc32 in one read |
 | `extract_embedded_sha1` | `(path) -> str \| None` | CHD v5 embedded `rawsha1`, no hunk decompression |
 | `ScanResult`, `VerifyResult`, `ClassifyResult`, `HashFileResult` | N/A | Result dataclasses; see `result.py` docstrings |
@@ -224,6 +228,44 @@ The hash index (`hash_index.json`, cached at `~/.formatscout/`) has confirmed en
 
 **Xbox 360** has an `_ERA_MARKERS` mapping and hash-index entries, but no structural or directory detection path exists for it yet. Outside Tier 1, the only Xbox 360 signal is a `.xex` file suffix, which returns `xbox360` at 0.7 from the extension alone. Xbox 360 disc images are not separated from original Xbox: a disc image with the XDVDFS magic at 0x10000 is reported as era `xbox` whatever its generation, and so is a raw DVD rip over 4 GiB.
 
+## Hash index
+
+Tier 1 and `classify()`/`verify()` read a hash index (`hash_index.json`, about 88 MB). It is not bundled in the installed package.
+
+**Which file is read.** First match wins:
+
+1. the keyword-only `index_path=` argument of `detect()`, `classify()` or `verify()` (or the `path` argument of `ensure_index()`);
+2. the `FORMATSCOUT_INDEX_PATH` environment variable (empty or blank means unset; used as given, so expand `~` in your shell);
+3. the default cache, `~/.formatscout/hash_index.json`.
+
+The home directory is looked up only when the default is needed, never at import. If it cannot be determined (and neither 1 nor 2 applies) the index counts as unavailable, see below.
+
+**Only the default cache is managed.** If that file is missing it is downloaded on first use, over https only, size-capped, verified against a hardcoded sha256 and installed atomically together with a `hash_index.json.meta` sidecar (sha256, size, mtime, source URL) recording that this code downloaded it. A file there that carries the sidecar is re-checked against the pin once per process, and a modified one is moved aside (`hash_index.json.corrupt`, then `.corrupt.1` to `.corrupt.5`, never overwriting an earlier copy) and re-downloaded. A file there with no sidecar, or any file at another path, is yours: it gets only the size cap (256 MiB) and a JSON validity check, is never downloaded to, pin-checked or moved, and a sidecar next to a non-default path is ignored. A missing file at a non-default path is not an error: `classify()` and `verify()` treat it as an empty index, and `detect()` skips the hash tier quietly.
+
+**Implicit download is on by default.** The first `detect()`, `classify()` or `verify()` with no index in place downloads one. To avoid that, set `FORMATSCOUT_OFFLINE=1` (no download is ever attempted, an existing index is still used), point `index_path=` or `FORMATSCOUT_INDEX_PATH` at your own file, or call `ensure_index()` yourself at a time and with a timeout of your choosing. After a failed download no new attempt is made for 5 minutes (also across processes).
+
+**`ensure_index()`** returns the resolved path once a usable index is there:
+
+```python
+from formatscout import ensure_index, IndexUnavailable, IndexIntegrityError
+
+try:
+    path = ensure_index(timeout=15, max_bytes=200_000_000)   # default cache: downloads if missing
+except IndexIntegrityError:   # sha256 mismatch, or a corrupt or oversized index file
+    ...
+except IndexUnavailable:      # offline mode, backoff, failed or capped download, missing or unreadable file, no home directory
+    ...
+```
+
+- For the default cache it downloads when needed, as above. For any other path (explicit or from the environment) it only validates the file and raises `IndexUnavailable` if it is missing; it never downloads to it.
+- `force=True` re-downloads even when a valid index exists, and skips the 5 minute backoff (never `FORMATSCOUT_OFFLINE`). The new file is downloaded and verified before anything is touched, so a failed refresh changes nothing. An unmodified copy of an earlier download is then replaced atomically; any other file at the default cache path, including an index you built there yourself, is moved aside to `.corrupt` (or the next free `.corrupt.N`) instead of being overwritten, and if all six names are taken the refresh fails and the file stays. For a non-default path, `force` just re-validates the file.
+- `timeout` is the per-socket-operation timeout in seconds (default 30; a whole download is also limited to 600 s). `max_bytes` is the download size cap (default 128 MiB) and, for a path other than the default cache, an extra size cap checked before parsing. The 256 MiB load cap always applies, so `max_bytes` can only lower it.
+- `IndexUnavailable` is an `OSError` (not a `FileNotFoundError`); `IndexIntegrityError` is a subclass, so one `except IndexUnavailable` covers every index failure. The original cause is chained as `__cause__`.
+
+**When the index is unavailable.** `detect()` still never raises: it skips the hash tier, appends a `hash index unavailable: ...; heuristics only` warning and an `INDEX_UNAVAILABLE` issue (same message) to the result. `classify()` and `verify()` return `status="unchecked"` with an `INDEX_UNAVAILABLE` issue instead of raising, keeping `computed_sha1` (the file did hash). Check the issue code to tell this from `classify()`'s other `unchecked` case, `hash_failed` (the file itself could not be read, `computed_sha1` is None). Pass `strict=True` to get `IndexUnavailable` raised instead. `verify()` still lets an unreadable input file raise `OSError`.
+
+**Using an index you built.** `python -m formatscout.hashing.build_index --dats <dir> --output <path>` writes the index and prints where the runtime reads and how to use the result. Then either set `FORMATSCOUT_INDEX_PATH=<path>`, pass `index_path=<path>` to `detect()`/`classify()`/`verify()`, or build straight to the default cache (`--output ~/.formatscout/hash_index.json`). When the output is the default cache, a stale sidecar left by an earlier download is deleted just before the new index is moved into place, so the file you built is treated as yours and not quarantined.
+
 ## Adding a new DAT
 
 ```bash
@@ -231,7 +273,7 @@ python -m formatscout.hashing.build_index \
     --dats <directory-of-dat-files> [--output <path>] [--rebuild]
 ```
 
-Manual process, no ingestion automation. Sourced from [Redump](http://redump.org/), [No-Intro](https://datomatic.no-intro.org/), and [TOSEC](https://www.tosecdev.org/). Only records with a `sha1` value get indexed. MD5/CRC32-only entries parse without error but contribute zero rows. The run logs a skipped-record count, so this isn't silent. `build_index`'s default `--output` is `formatscout/hashing/hash_index.json` inside the package directory. The runtime never reads that path. It reads `~/.formatscout/hash_index.json`, so a locally built index is not used by `detect()`, `classify()` or `verify()` unless it is copied there.
+Manual process, no ingestion automation. Sourced from [Redump](http://redump.org/), [No-Intro](https://datomatic.no-intro.org/), and [TOSEC](https://www.tosecdev.org/). Only records with a `sha1` value get indexed. MD5/CRC32-only entries parse without error but contribute zero rows. The run logs a skipped-record count, so this isn't silent. `build_index`'s default `--output` is still `formatscout/hashing/hash_index.json` inside the package directory. The runtime never reads that path by default, so a locally built index is not used by `detect()`, `classify()` or `verify()` until you point them at it. The run ends by printing the path the runtime reads and how to use the result: pass `--output` with that path, set `FORMATSCOUT_INDEX_PATH`, or pass `index_path=`. See [Hash index](#hash-index).
 
 DAT files are third-party, untrusted input. `dat_parser.parse_dat()` rejects any DAT that declares XML entities in its DOCTYPE internal subset, guarding against the entity-expansion vector in `ElementTree`. Real Logiqx/Redump/No-Intro external DOCTYPEs are unaffected. The index write is atomic, a temp file plus `os.replace()`, so an interrupted run leaves the previous index intact.
 
@@ -240,10 +282,10 @@ DAT files are third-party, untrusted input. `dat_parser.parse_dat()` rejects any
 - Xbox OG ISOs with no `.xbe` in the root directory fall through to `xbox_image.py`'s byte-offset check. The magic-byte tier doesn't apply here since no `.iso` signature exists. The `.xbe` check only reads an ISO 9660 root directory located through the PVD, and the code never parses XDVDFS directory entries. XDVDFS images (xISO) have no ISO 9660 PVD, so they are identified only by the XDVDFS magic. Whether real Xbox rips carry `DEFAULT.XBE` in an ISO 9660 root is unverified.
 - `.bin`/`.cue` pairs missing their `.cue` sibling return low confidence with a warning.
 - Every entry point takes a local, seekable `Path`. No stream or object-storage handle support.
-- `detect()` never raises. `classify()` returns `status="unchecked"` only for an `OSError` while hashing the file. Index errors are not caught: a failed or suppressed download (network error, timeout, size cap, sha256 mismatch, a recent failure within the 5 minute retry backoff, or `FORMATSCOUT_OFFLINE=1`) or an oversized or corrupt `hash_index.json` propagates out of `classify()` and `verify()` as a private `OSError` subclass, with the original error chained as `__cause__`. A missing index file at a custom path is still treated as an empty index. `detect()` catches these, logs a warning, adds a `hash index unavailable: ...; heuristics only` warning to the result, and continues without the hash tier. `verify()` and `hash_file()` let read errors propagate.
+- `detect()` never raises for an input path (an `index_path` of the wrong type or an empty string is a programming error and raises `TypeError`/`ValueError`). An unusable index (a failed or suppressed download: network error, timeout, size cap, sha256 mismatch, a recent failure within the 5 minute retry backoff, or `FORMATSCOUT_OFFLINE=1`; an oversized, corrupt or unreadable `hash_index.json`; or no home directory for the default location) does not raise from `detect()`, `classify()` or `verify()`: `detect()` logs a warning, adds a `hash index unavailable: ...; heuristics only` warning and an `INDEX_UNAVAILABLE` issue, and continues without the hash tier, while `classify()` and `verify()` return `status="unchecked"` with an `INDEX_UNAVAILABLE` issue. `strict=True` makes them raise `IndexUnavailable` (an `OSError`, original error chained as `__cause__`) instead. `classify()` also returns `unchecked` with `hash_failed` for an `OSError` while hashing the file. A missing index file at a custom path is still treated as an empty index. `verify()` and `hash_file()` let read errors on the input file propagate.
 - Size thresholds use different units by design. The Xbox DVD-rip/ISO-fallback boundary is binary 4 GiB. The PS1/PS2 boundary in `detect_from_pvd()` is decimal 4.7GB, matching how disc capacities are usually quoted.
 - `requires_extraction` is only set by the Xbox DVD-rip path today. Callers run their own conversion tooling, such as extract-xiso. This package only detects the need.
-- `hash_index.json` is not bundled in the installed distribution. It is downloaded once on first hash lookup, verified against a hardcoded sha256, and cached under `~/.formatscout/` together with a `hash_index.json.meta` sidecar (sha256, size, mtime, source URL) that records the file came from this download. Only a file with that sidecar is checked against the pin; a file without one (for example an index you built yourself and placed at the cache path) is treated as user-supplied and only gets the size cap and JSON validity check. That first run requires network access unless you supply an index; with `FORMATSCOUT_OFFLINE=1` no download is attempted.
+- `hash_index.json` is not bundled in the installed distribution. It is downloaded once on first hash lookup (this implicit download is the default in this release), verified against a hardcoded sha256, and cached under `~/.formatscout/` together with a `hash_index.json.meta` sidecar. Only a file with that sidecar is checked against the pin; any other file is yours and only gets the size cap and JSON validity check. That first run requires network access unless you supply an index (`index_path=`, `FORMATSCOUT_INDEX_PATH`) or call `ensure_index()` earlier; with `FORMATSCOUT_OFFLINE=1` no download is attempted. See [Hash index](#hash-index).
 
 ## Backlog
 

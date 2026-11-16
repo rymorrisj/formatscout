@@ -13,15 +13,20 @@ Why each patch exists:
   Note: hash_lookup downloads via urllib.request.build_opener().open, which
   does not go through urllib.request.urlopen, so only the socket patches cover
   it; tests of the download patch hash_lookup._open_index_url instead.
-* hash_lookup._CACHE_DIR/_DEFAULT_INDEX_PATH/_fetch_default_index -> a
-  nonexistent tmp path and a raising stub, so no code path can download.
+* hash_lookup._CACHE_DIR/_DEFAULT_INDEX_PATH (override hooks, None by
+  default meaning "compute from the home directory") and _fetch_default_index
+  -> a nonexistent tmp path and a raising stub, so no code path can download.
+* FORMATSCOUT_INDEX_PATH and FORMATSCOUT_OFFLINE are removed from the
+  environment, so a developer's own settings cannot change what a test sees;
+  a test that needs either sets it itself.
 * hash_lookup's process-level backoff / verified-file / log-once state is
   reset for each test.
-* detector/classify/verify._INDEX_PATH are bound to the real home at import
-  time (collection happens before any fixture runs), so they are re-pointed
-  here via the shared fx.patch_* helpers. They get a nonexistent path that
-  differs from _DEFAULT_INDEX_PATH on purpose: an unpatched call then gets the
-  quiet FileNotFoundError path instead of a fetch attempt.
+* detector/classify/verify._INDEX_PATH are override hooks (None by default,
+  meaning explicit argument, then FORMATSCOUT_INDEX_PATH, then the default
+  cache), so they are pointed here via the shared fx.patch_* helpers at a
+  nonexistent path that differs from the default cache path on purpose: an
+  unpatched call then gets the quiet FileNotFoundError path instead of a fetch
+  attempt. A test of the default resolution sets the hook back to None.
 
 Tests that call fx.patch_* or monkeypatch.setattr themselves use this same
 function-scoped monkeypatch and run after this setup, so their values win and
@@ -67,6 +72,9 @@ def _hermetic_environment(monkeypatch, tmp_path_factory, network_guard):
     home = tmp_path_factory.mktemp("home")
     for var in ("HOME", "USERPROFILE", "XDG_CACHE_HOME", "LOCALAPPDATA"):
         monkeypatch.setenv(var, str(home))
+
+    monkeypatch.delenv("FORMATSCOUT_INDEX_PATH", raising=False)
+    monkeypatch.delenv("FORMATSCOUT_OFFLINE", raising=False)
 
     monkeypatch.setattr(socket.socket, "connect", _blocker("socket.connect", network_guard, True))
     monkeypatch.setattr(socket.socket, "connect_ex", _blocker("socket.connect_ex", network_guard, True))

@@ -12,6 +12,7 @@ import zlib
 from pathlib import Path
 from typing import Any
 
+from ..index_errors import IndexIntegrityError, IndexUnavailable
 from ..result import HashFileResult, Method, ScanResult, Status
 from ..validators.chd_validator import extract_embedded_sha1
 
@@ -21,12 +22,19 @@ _CHUNK = 65536
 
 # hash_index.json is not shipped in the built distribution (it's ~88MB), so
 # it is downloaded on first use and cached locally instead. See
-# _fetch_default_index(). _CACHE_DIR and _DEFAULT_INDEX_PATH must name the
-# same directory (the download's temp file lives in _CACHE_DIR and is
-# os.replace()d onto _DEFAULT_INDEX_PATH). Both are read at call time, never
-# captured, so tests can re-point them.
-_CACHE_DIR = Path.home() / ".formatscout"
-_DEFAULT_INDEX_PATH = _CACHE_DIR / "hash_index.json"
+# _fetch_default_index().
+#
+# Nothing here touches the home directory at import time (Path.home() can
+# raise, and importing the package must not). _CACHE_DIR and
+# _DEFAULT_INDEX_PATH are override hooks, None meaning "compute from the home
+# directory when needed": see _cache_dir() and default_index_path(). When both
+# are set they must name the same directory (the download's temp file lives in
+# the cache dir and is os.replace()d onto the default index path). Both are
+# read at call time, never captured, so tests can re-point them.
+_CACHE_DIR: Path | None = None
+_DEFAULT_INDEX_PATH: Path | None = None
+_CACHE_DIR_NAME = ".formatscout"
+_INDEX_FILE_NAME = "hash_index.json"
 
 _INDEX_DOWNLOAD_URL = "https://github.com/rymorrisj/formatscout/releases/download/full_hash_v0.1.0/hash_index.json"
 _INDEX_SHA256 = "17fa892b072b4d942ef920eef8bdee034e8e0acdf508ab484f1afefe992dfce2"
@@ -87,25 +95,54 @@ _QUARANTINE_SLOTS = 6
 _index_cache: dict[Path, tuple[float, dict, dict, dict]] = {}
 
 
-class _IndexUnavailableError(OSError):
-    """The hash index cannot be obtained or used (private to the package).
-
-    Raised for: downloads disabled by FORMATSCOUT_OFFLINE, a download attempt
-    suppressed by the failure backoff, a failed download (the original error
-    is chained as __cause__), and an index file that is too large or corrupt.
-    Deliberately not a FileNotFoundError: classify()/verify() treat that as
-    "no index built" and degrade to empty, whereas this means the index
-    exists or should exist and could not be trusted or fetched.
-    """
+# The 0.1.3/0.1.4 private names, kept as aliases of the public exceptions in
+# index_errors.py so existing `except`/`raises` on them see the same classes.
+_IndexUnavailableError = IndexUnavailable
+_IndexCorruptError = IndexIntegrityError
 
 
-class _IndexCorruptError(_IndexUnavailableError):
-    """An index file exists but is oversized, not valid JSON, or malformed."""
+class _PinMismatchError(ValueError):
+    """A download's sha256 differs from the pin (private; surfaces to callers
+    as IndexIntegrityError chained from this)."""
+
+
+def _cache_dir() -> Path:
+    """Directory holding the cached index, its sidecar, temp files and the
+    failure marker. Raises IndexUnavailable if the home directory is needed
+    and cannot be determined."""
+    if _CACHE_DIR is not None:
+        return _CACHE_DIR
+    if _DEFAULT_INDEX_PATH is not None:
+        return _DEFAULT_INDEX_PATH.parent
+    try:
+        home = Path.home()
+    except (RuntimeError, KeyError, OSError) as exc:
+        raise IndexUnavailable(
+            "cannot determine the home directory for the default index cache; "
+            "set FORMATSCOUT_INDEX_PATH or pass index_path="
+        ) from exc
+    return home / _CACHE_DIR_NAME
 
 
 def default_index_path() -> Path:
-    """Local cache location for hash_index.json, downloaded here on first use."""
-    return _DEFAULT_INDEX_PATH
+    """Local cache location for hash_index.json, downloaded here on first use.
+
+    Computed on each call (never at import). Raises IndexUnavailable if the
+    home directory cannot be determined.
+    """
+    if _DEFAULT_INDEX_PATH is not None:
+        return _DEFAULT_INDEX_PATH
+    return _cache_dir() / _INDEX_FILE_NAME
+
+
+def is_default_cache_path(index_path: Path) -> bool:
+    """True if *index_path* is the default cache location, the only path the
+    download/provenance logic ever manages. False when the default cannot be
+    computed (no home directory)."""
+    try:
+        return index_path == default_index_path()
+    except IndexUnavailable:
+        return False
 
 
 # ── Download ─────────────────────────────────────────────────────────────────
@@ -151,7 +188,7 @@ def _remove_stale_temp_files() -> None:
     """Best-effort removal of download temp files left by a killed process."""
     try:
         cutoff = _wall_time() - _STALE_TEMP_SECONDS
-        for stale in _CACHE_DIR.glob(f".{_DEFAULT_INDEX_PATH.name}.*.tmp"):
+        for stale in _cache_dir().glob(f".{default_index_path().name}.*.tmp"):
             try:
                 if stale.stat().st_mtime < cutoff:
                     stale.unlink()
@@ -227,10 +264,20 @@ def _read_sidecar(path: Path) -> tuple[str, int, int] | None:
     return sha256, size, mtime_ns
 
 
-def _download_default_index() -> None:
+def _download_default_index(
+    *, timeout: float | None = None, max_download_bytes: int | None = None, displace: bool = False,
+) -> None:
     """Stream the index to a temp file in the cache dir, verify, and atomically
     install it together with its provenance sidecar (see _write_sidecar()).
     No backoff/offline logic here, see _fetch_default_index().
+
+    *timeout* is the per-socket-operation timeout and *max_download_bytes* the
+    body cap; None means _SOCKET_TIMEOUT_SECONDS / _MAX_DOWNLOAD_BYTES, read
+    at call time. *displace* (used by a forced refresh) moves an existing file
+    at the cache path that is not a pristine copy of one of our downloads
+    aside, with the no-overwrite quarantine naming, after the new body has
+    been verified and before it is installed; so a failed download never
+    touches what is there.
 
     Streams in chunks with an incremental sha256 (never holds the whole body
     in memory), enforces _MAX_DOWNLOAD_BYTES and an overall monotonic
@@ -240,7 +287,11 @@ def _download_default_index() -> None:
     The deadline is checked between reads; a stalled read is bounded by the
     per-socket timeout, so the worst-case overrun is one socket timeout.
     """
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    target = default_index_path()
+    cache_dir = _cache_dir()
+    limit = _MAX_DOWNLOAD_BYTES if max_download_bytes is None else max_download_bytes
+    socket_timeout = _SOCKET_TIMEOUT_SECONDS if timeout is None else timeout
+    cache_dir.mkdir(parents=True, exist_ok=True)
     _remove_stale_temp_files()
 
     deadline = _monotonic() + _DOWNLOAD_DEADLINE_SECONDS
@@ -248,18 +299,18 @@ def _download_default_index() -> None:
     total = 0
 
     fd, tmp_name = tempfile.mkstemp(
-        dir=_CACHE_DIR, prefix=f".{_DEFAULT_INDEX_PATH.name}.", suffix=".tmp",
+        dir=cache_dir, prefix=f".{target.name}.", suffix=".tmp",
     )
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as fh:
-            with _open_index_url(_INDEX_DOWNLOAD_URL, _SOCKET_TIMEOUT_SECONDS) as response:
+            with _open_index_url(_INDEX_DOWNLOAD_URL, socket_timeout) as response:
                 read_some = getattr(response, "read1", None) or response.read
                 declared = _declared_length(response)
-                if declared is not None and declared > _MAX_DOWNLOAD_BYTES:
+                if declared is not None and declared > limit:
                     raise ValueError(
                         f"hash_index.json download declares {declared} bytes, "
-                        f"over the {_MAX_DOWNLOAD_BYTES} byte limit"
+                        f"over the {limit} byte limit"
                     )
                 while True:
                     if _monotonic() > deadline:
@@ -275,9 +326,9 @@ def _download_default_index() -> None:
                     if not chunk:
                         break
                     total += len(chunk)
-                    if total > _MAX_DOWNLOAD_BYTES:
+                    if total > limit:
                         raise ValueError(
-                            f"hash_index.json download exceeded the {_MAX_DOWNLOAD_BYTES} byte limit"
+                            f"hash_index.json download exceeded the {limit} byte limit"
                         )
                     digest.update(chunk)
                     fh.write(chunk)
@@ -286,10 +337,16 @@ def _download_default_index() -> None:
 
         actual = digest.hexdigest()
         if actual != _INDEX_SHA256:
-            raise ValueError(
+            raise _PinMismatchError(
                 f"hash_index.json download failed sha256 verification: "
                 f"expected {_INDEX_SHA256}, got {actual}"
             )
+        if displace and not _is_pristine_download(target):
+            # Missing (nothing to move), our own modified/older copy, or a
+            # user-supplied file: moved aside, never overwritten. A pristine
+            # managed copy is simply replaced by the atomic rename below.
+            if os.path.lexists(target):
+                _quarantine(target)
         # Provenance sidecar first, then the index. A crash in between leaves
         # a sidecar that does not match the (absent or older) index, which
         # fails closed: the next load quarantines or refetches. The reverse
@@ -297,11 +354,11 @@ def _download_default_index() -> None:
         # mtime_ns is read from the temp file; rename keeps it, so it is what
         # stat() reports for the installed file.
         stat = os.stat(tmp_path)
-        _write_sidecar(_DEFAULT_INDEX_PATH, actual, stat.st_size, stat.st_mtime_ns)
+        _write_sidecar(target, actual, stat.st_size, stat.st_mtime_ns)
         try:
-            os.replace(tmp_path, _DEFAULT_INDEX_PATH)
+            os.replace(tmp_path, target)
         except BaseException:
-            _sidecar_path(_DEFAULT_INDEX_PATH).unlink(missing_ok=True)
+            _sidecar_path(target).unlink(missing_ok=True)
             raise
     except BaseException:
         tmp_path.unlink(missing_ok=True)
@@ -309,24 +366,28 @@ def _download_default_index() -> None:
 
 
 def _failure_marker_path() -> Path:
-    return _CACHE_DIR / _FAILURE_MARKER_NAME
+    return _cache_dir() / _FAILURE_MARKER_NAME
 
 
 def _offline_requested() -> bool:
     return os.environ.get(_OFFLINE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _raise_if_fetch_blocked() -> None:
-    """Raise _IndexUnavailableError, without touching the network, when
+def _raise_if_fetch_blocked(*, ignore_backoff: bool = False) -> None:
+    """Raise IndexUnavailable, without touching the network, when
     FORMATSCOUT_OFFLINE is set or a download failed within the backoff window
-    (in this process, or in any process via the failure marker file)."""
+    (in this process, or in any process via the failure marker file).
+    *ignore_backoff* skips the backoff checks only, never the offline one."""
     if _offline_requested():
-        raise _IndexUnavailableError(f"downloads disabled by {_OFFLINE_ENV}")
+        raise IndexUnavailable(f"downloads disabled by {_OFFLINE_ENV}")
+
+    if ignore_backoff:
+        return
 
     if _last_fetch_failure is not None:
         remaining = _FETCH_BACKOFF_SECONDS - (_monotonic() - _last_fetch_failure)
         if remaining > 0:
-            raise _IndexUnavailableError(
+            raise IndexUnavailable(
                 f"recent download failed; not retrying for {remaining:.0f}s"
             )
 
@@ -336,7 +397,7 @@ def _raise_if_fetch_blocked() -> None:
         return
     # A negative age means the clock moved backwards; do not trust the marker.
     if 0 <= age < _FETCH_BACKOFF_SECONDS:
-        raise _IndexUnavailableError(
+        raise IndexUnavailable(
             f"recent download failed; not retrying for {_FETCH_BACKOFF_SECONDS - age:.0f}s"
         )
 
@@ -380,24 +441,46 @@ def _record_fetch_success() -> None:
         pass
 
 
-def _fetch_default_index() -> None:
+def _fetch_default_index(
+    *, timeout: float | None = None, max_download_bytes: int | None = None, force: bool = False,
+) -> None:
     """Download, sha256-verify, and cache hash_index.json.
 
-    Refuses (raising _IndexUnavailableError, no network access) when
+    Refuses (raising IndexUnavailable, no network access) when
     FORMATSCOUT_OFFLINE is set or a recent attempt failed, see
     _raise_if_fetch_blocked(). Any download failure is recorded for the
-    backoff and re-raised as _IndexUnavailableError chained from the cause.
-    No offline fallback to an empty index: errors propagate to the caller.
+    backoff and re-raised as IndexUnavailable chained from the cause (a sha256
+    mismatch as IndexIntegrityError). A failure that is not a download failure
+    (the home directory is unknown, an unusable file could not be moved aside)
+    propagates as the IndexUnavailable it already is and does not start the
+    backoff. No offline fallback to an empty index: errors propagate.
+
+    *force* is a user-requested refresh: it ignores the backoff window (never
+    the offline switch), moves a file at the cache path that is not a
+    pristine managed copy aside instead of overwriting it, and on success
+    forgets and re-marks everything cached about the path.
     """
-    _raise_if_fetch_blocked()
+    _raise_if_fetch_blocked(ignore_backoff=force)
     try:
-        _download_default_index()
+        _download_default_index(timeout=timeout, max_download_bytes=max_download_bytes, displace=force)
+    except IndexUnavailable:
+        raise
     except Exception as exc:
         _record_fetch_failure()
         reason = " ".join(f"{type(exc).__name__}: {exc}".split())
         _report_index_failure(f"hash index download failed: {reason}")
-        raise _IndexUnavailableError(f"download failed ({reason[:160]})") from exc
+        kind = IndexIntegrityError if isinstance(exc, _PinMismatchError) else IndexUnavailable
+        raise kind(f"download failed ({reason[:160]})") from exc
     _record_fetch_success()
+    if force:
+        target = default_index_path()
+        forget_index(target)
+        try:
+            _mark_verified(target)
+        except OSError:
+            # Moved or removed by another process since the install; the next
+            # load re-checks it (or downloads) under the normal rules.
+            pass
 
 
 # ── Hashing and lookup ───────────────────────────────────────────────────────
@@ -560,12 +643,38 @@ def _move_no_overwrite(src: Path, dst: Path) -> None:
         raise
 
 
+def forget_index(path: Path) -> None:
+    """Drop everything cached in this process about the index at *path*: the
+    parsed index and the once-per-file-version provenance verdicts. The next
+    load re-parses and re-checks. Documented internal API (used by index.py)."""
+    _index_cache.pop(path, None)
+    # list() snapshots the keys in one step, so another thread adding a key
+    # meanwhile cannot raise "dictionary changed size during iteration".
+    for key in [k for k in list(_verified_default) if k[0] == path]:
+        _verified_default.pop(key, None)
+
+
+def _is_pristine_download(path: Path) -> bool:
+    """True if *path* is, as far as its sidecar can prove, an unmodified copy
+    of the currently pinned download: a valid sidecar for the current pin whose
+    identity matches (or whose content hashes to the pin). Anything else
+    (absent or malformed sidecar, another release, modified content) is not."""
+    recorded = _read_sidecar(path)
+    if recorded is None:
+        return False
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    return _cache_provenance_ok(path, stat, recorded)
+
+
 def _quarantine(path: Path) -> None:
     """Move a bad default-cache file aside, never overwriting an earlier
     quarantined copy, and forget everything cached about it.
 
     The destination is the first free of <name>.corrupt, .corrupt.1 ...
-    .corrupt.5; if all are taken this raises _IndexUnavailableError asking
+    .corrupt.5; if all are taken this raises IndexUnavailable asking
     the user to clean up (the file stays where it is). At most six copies are
     kept, which bounds the disk this can consume.
 
@@ -574,13 +683,11 @@ def _quarantine(path: Path) -> None:
     A file that is already gone (another process quarantined it first) counts
     as done, and then the sidecar is left alone because it may belong to that
     process's refetch. Any other OS error (e.g. a Windows sharing violation)
-    raises _IndexUnavailableError. That is deliberately not recorded as a
+    raises IndexUnavailable. That is deliberately not recorded as a
     download failure: no download was attempted, so it must not start the
     backoff.
     """
-    _index_cache.pop(path, None)
-    for key in [k for k in _verified_default if k[0] == path]:
-        del _verified_default[key]
+    forget_index(path)
 
     for slot in range(_QUARANTINE_SLOTS):
         target = path.with_name(path.name + (".corrupt" if slot == 0 else f".corrupt.{slot}"))
@@ -591,13 +698,13 @@ def _quarantine(path: Path) -> None:
         except FileNotFoundError:
             return
         except OSError as exc:
-            raise _IndexUnavailableError(
+            raise IndexUnavailable(
                 f"cannot quarantine unusable index cache ({type(exc).__name__})"
             ) from exc
         log.warning("quarantined unusable hash index cache: %s -> %s", path, target.name)
         break
     else:
-        raise _IndexUnavailableError(
+        raise IndexUnavailable(
             f"cannot quarantine unusable index cache: {path.name}.corrupt through "
             f"{path.name}.corrupt.{_QUARANTINE_SLOTS - 1} already exist in {path.parent}; "
             "please delete the old quarantined copies"
@@ -655,7 +762,7 @@ def _parse_index(index_path: Path) -> tuple[dict, dict, dict]:
     """mtime-cached parse of *index_path* into (sha1, md5, crc32) indices.
 
     Refuses files over _MAX_INDEX_BYTES before json.load(). Raises
-    _IndexCorruptError for an oversized, non-JSON, or malformed file.
+    IndexIntegrityError for an oversized, non-JSON, or malformed file.
     """
     stat = index_path.stat()
     mtime = stat.st_mtime
@@ -664,7 +771,7 @@ def _parse_index(index_path: Path) -> tuple[dict, dict, dict]:
         return cached[1], cached[2], cached[3]
 
     if stat.st_size > _MAX_INDEX_BYTES:
-        raise _IndexCorruptError(
+        raise IndexIntegrityError(
             f"index file is {stat.st_size} bytes, over the {_MAX_INDEX_BYTES} byte limit"
         )
 
@@ -672,15 +779,15 @@ def _parse_index(index_path: Path) -> tuple[dict, dict, dict]:
         with index_path.open("r", encoding="utf-8") as fh:
             index = json.load(fh)
     except (ValueError, RecursionError) as exc:  # JSONDecodeError, UnicodeDecodeError
-        raise _IndexCorruptError(f"index file is not valid JSON ({exc})") from exc
+        raise IndexIntegrityError(f"index file is not valid JSON ({exc})") from exc
     if not isinstance(index, dict):
-        raise _IndexCorruptError("index file is not a JSON object")
+        raise IndexIntegrityError("index file is not a JSON object")
 
     md5_index: dict[str, dict] = {}
     crc32_index: dict[str, dict] = {}
     for entry in index.values():
         if not isinstance(entry, dict):
-            raise _IndexCorruptError("index file has a non-object entry")
+            raise IndexIntegrityError("index file has a non-object entry")
         md5 = entry.get("md5")
         if md5 and md5 not in md5_index:
             md5_index[md5] = entry
@@ -692,7 +799,7 @@ def _parse_index(index_path: Path) -> tuple[dict, dict, dict]:
     return index, md5_index, crc32_index
 
 
-def _load_default_index(path: Path) -> tuple[dict, dict, dict]:
+def _load_default_index(path: Path, fetch_opts: dict[str, Any] | None = None) -> tuple[dict, dict, dict]:
     """Load the default cache, checking provenance only if we downloaded it.
 
     A file with a valid sidecar (written by our download) is "managed": once
@@ -705,10 +812,14 @@ def _load_default_index(path: Path) -> tuple[dict, dict, dict]:
 
     A freshly downloaded file is pin-verified by the download itself. A
     managed file that fails to parse is quarantined and refetched.
+
+    *fetch_opts* (timeout / max_download_bytes) is passed through to every
+    download this load triggers.
     """
+    opts = fetch_opts or {}
     fresh = False
     if not path.exists():
-        _fetch_default_index()
+        _fetch_default_index(**opts)
         fresh = True
     stat = path.stat()
     key = (path, stat.st_size, stat.st_mtime_ns)
@@ -728,15 +839,15 @@ def _load_default_index(path: Path) -> tuple[dict, dict, dict]:
             _verified_default[key] = True
         else:
             _quarantine(path)
-            _fetch_default_index()
+            _fetch_default_index(**opts)
             fresh = managed = True
             _mark_verified(path)
 
     try:
         return _parse_index(path)
-    except _IndexCorruptError as exc:
+    except IndexIntegrityError as exc:
         if not managed:
-            raise _IndexCorruptError(
+            raise IndexIntegrityError(
                 f"{exc}; {path} has no download record so it is treated as "
                 "user-supplied and was left in place: fix it, or delete it to "
                 "download the pinned index"
@@ -747,51 +858,73 @@ def _load_default_index(path: Path) -> tuple[dict, dict, dict]:
             # refetch; start the backoff so callers do not re-download per call.
             _record_fetch_failure()
             raise
-    _fetch_default_index()
+    _fetch_default_index(**opts)
     _mark_verified(path)  # the refetch was pin-verified by the download itself
     try:
         return _parse_index(path)
-    except _IndexCorruptError:
+    except IndexIntegrityError:
         _quarantine(path)
         _record_fetch_failure()
         raise
 
 
-def load_index(index_path: Path) -> tuple[dict, dict, dict]:
+def load_index(
+    index_path: Path, *, timeout: float | None = None, max_download_bytes: int | None = None,
+) -> tuple[dict, dict, dict]:
     """Load (and mtime-cache) the sha1/md5/crc32 indices at *index_path*.
 
     Documented internal API: called across module boundaries by classify.py,
-    verify.py, and hashing/title_match.py, not just from within this module,
-    so it is not underscore-prefixed despite not being part of the public
-    formatscout.__init__ surface.
+    verify.py, index.py and hashing/title_match.py, not just from within this
+    module, so it is not underscore-prefixed despite not being part of the
+    public formatscout.__init__ surface.
+
+    Only the default cache location (see default_index_path()) is managed:
+    a missing file there is downloaded, and a file with our download's
+    provenance sidecar is checked against the pin. Every other path is
+    user-supplied: trusted as-is subject to the size cap and JSON validity,
+    never downloaded to, never pin-checked, never quarantined, and a sidecar
+    next to it is ignored. *timeout* and *max_download_bytes* (per-socket
+    timeout and body cap, None for the module defaults) apply only to a
+    download of the default cache.
 
     Raises FileNotFoundError if index_path does not exist and is not the
-    default cache location (which is downloaded instead, see
-    _fetch_default_index). A FileNotFoundError raised while loading the
+    default cache location. A FileNotFoundError raised while loading the
     default cache (a race with another process) is converted to
-    _IndexUnavailableError. Raises _IndexUnavailableError (an OSError, not a
+    IndexUnavailable. Raises IndexUnavailable (an OSError, not a
     FileNotFoundError) if the default index cannot be downloaded (offline mode,
-    backoff window, network or integrity failure) or any index file is too
-    large or corrupt.
-
-    Only a default cache that carries our download's provenance sidecar is
-    checked against the pin. A custom path, or a default-path file with no
-    sidecar (e.g. a user-built index), is trusted as-is, subject to the size
-    cap and JSON validity.
+    backoff window, network failure), cannot be read, or is too large or
+    corrupt (IndexIntegrityError for the last two and for a sha256 mismatch).
     """
-    if index_path == _DEFAULT_INDEX_PATH:
+    if is_default_cache_path(index_path):
+        fetch_opts = {
+            key: value for key, value in (("timeout", timeout), ("max_download_bytes", max_download_bytes))
+            if value is not None
+        }
         try:
-            return _load_default_index(index_path)
+            return _load_default_index(index_path, fetch_opts)
+        except IndexUnavailable:
+            raise
         except FileNotFoundError as exc:
             # The default cache vanished mid-load (e.g. quarantined by another
             # process). That is an index problem, not "no index built".
-            raise _IndexUnavailableError(
+            raise IndexUnavailable(
                 "hash index cache disappeared while loading"
             ) from exc
+        except OSError as exc:
+            raise IndexUnavailable(
+                f"cannot read the hash index cache ({type(exc).__name__})"
+            ) from exc
 
-    if not index_path.exists():
-        raise FileNotFoundError(
-            f"Hash index not found at {index_path}. "
-            "Run build_index.py to generate it from your DAT files."
-        )
-    return _parse_index(index_path)
+    try:
+        if not index_path.exists():
+            raise FileNotFoundError(
+                f"Hash index not found at {index_path}. "
+                "Run build_index.py to generate it from your DAT files."
+            )
+        return _parse_index(index_path)
+    except (IndexUnavailable, FileNotFoundError):
+        raise
+    except OSError as exc:
+        raise IndexUnavailable(
+            f"cannot read the hash index at {index_path} ({type(exc).__name__})"
+        ) from exc

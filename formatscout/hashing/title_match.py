@@ -2,6 +2,7 @@ import re
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from ..index_path import resolve_index_path
 from . import hash_lookup as _hash_lookup
 
 # Redump/No-Intro titles carry region/language/revision tags in brackets
@@ -29,10 +30,15 @@ def _titles_for_era(era: str, index_path: Path) -> list[tuple[str, str]]:
         # returns None, the same degrade-to-empty behavior classify() already
         # applies when load_index fails for the sha1/md5/crc32 tiers.
         return []
-    mtime = index_path.stat().st_mtime
+    try:
+        mtime: float | None = index_path.stat().st_mtime
+    except OSError:
+        # Replaced or removed since load_index() returned: use the index
+        # already in hand, just without caching the title list.
+        mtime = None
     key = (index_path, era)
     cached = _title_cache.get(key)
-    if cached is not None and cached[0] == mtime:
+    if mtime is not None and cached is not None and cached[0] == mtime:
         return cached[1]
 
     seen: set[str] = set()
@@ -46,12 +52,13 @@ def _titles_for_era(era: str, index_path: Path) -> list[tuple[str, str]]:
         seen.add(original)
         titles.append((_normalize_title(original), original))
 
-    _title_cache[key] = (mtime, titles)
+    if mtime is not None:
+        _title_cache[key] = (mtime, titles)
     return titles
 
 
 def fuzzy_title_match(
-    title: str, era: str | None, index_path: Path, *, threshold: float = 0.80,
+    title: str, era: str | None, index_path: Path | None = None, *, threshold: float = 0.80,
 ) -> tuple[str, float] | None:
     """Best-effort approximate title match, scoped to *era* only.
 
@@ -62,10 +69,16 @@ def fuzzy_title_match(
     entries for it, or nothing clears *threshold*, never a low-confidence
     guess. Returns (matched_original_title, similarity_ratio) on a confident
     match.
+
+    index_path=None resolves like detect()'s index_path: FORMATSCOUT_INDEX_PATH,
+    else the default cache (see index_path.py). Index failures other than a
+    missing file at a custom path propagate as IndexUnavailable.
     """
     if not title or not era:
         return None
 
+    if index_path is None:
+        index_path = resolve_index_path()
     candidates = _titles_for_era(era, index_path)
     if not candidates:
         return None

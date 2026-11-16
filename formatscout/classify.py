@@ -2,27 +2,40 @@ from pathlib import Path
 
 from .hashing import hash_lookup as _hash_lookup
 from .hashing.title_match import fuzzy_title_match
+from .index_errors import INDEX_UNAVAILABLE, IndexUnavailable
+from .index_path import coerce_index_path, resolve_index_path
 from .result import ClassifyResult, HashKind, Issue
+from .utils.text import one_line
 from .validators.chd_validator import extract_embedded_sha1
 
-_INDEX_PATH = _hash_lookup.default_index_path()
+# Override hook for the index path (None: explicit argument, then
+# FORMATSCOUT_INDEX_PATH, then the default cache; see index_path.py). The test
+# suite points it at a tmp path; leave it None in application code.
+_INDEX_PATH: Path | None = None
 _DEFAULT_THRESHOLD = 0.80
 
 
 def classify(
     path: Path, title: str, era: str | None, *, threshold: float = _DEFAULT_THRESHOLD,
+    index_path: "Path | str | None" = None, strict: bool = False,
 ) -> ClassifyResult:
     """Five-state verification classification, see ClassifyResult for what
     each status means. Establishes a classification from scratch (ingest, or
     a from-scratch re-check), unlike verify(), which compares against an
     already-known expected_sha1.
 
-    Only an OSError while hashing the file becomes status="unchecked", and
-    only a missing custom index file (FileNotFoundError) is treated as an
-    empty index. Index download errors still escape: a failed or suppressed
-    download (offline mode, backoff) or an oversized/corrupt index raises an
-    OSError subclass from the index loader instead of returning a result.
+    index_path: keyword-only, the hash index to use instead of the
+    FORMATSCOUT_INDEX_PATH / default-cache resolution (see index_path.py).
+
+    status="unchecked" covers two cases, told apart by the issue code: an
+    OSError while hashing the file (hash_failed), and an index that cannot be
+    obtained or used (INDEX_UNAVAILABLE: offline mode, backoff, a failed
+    download, an oversized or corrupt index; computed_sha1 is still set).
+    With strict=True the second case raises IndexUnavailable instead. A
+    missing index file at a custom path (FileNotFoundError) is neither: it is
+    treated as an empty index, with an index_missing issue.
     """
+    explicit_index = coerce_index_path(index_path)
     try:
         hashes = _hash_lookup.hash_file(path)
     except OSError as exc:
@@ -36,10 +49,16 @@ def classify(
     issues: list[Issue] = []
 
     try:
-        index, md5_index, crc32_index = _hash_lookup.load_index(_INDEX_PATH)
-    except FileNotFoundError:
-        index, md5_index, crc32_index = {}, {}, {}
-        issues.append(Issue("index_missing", "index file not found, treated as an empty index"))
+        resolved_index = resolve_index_path(explicit_index, override=_INDEX_PATH)
+        try:
+            index, md5_index, crc32_index = _hash_lookup.load_index(resolved_index)
+        except FileNotFoundError:
+            index, md5_index, crc32_index = {}, {}, {}
+            issues.append(Issue("index_missing", "index file not found, treated as an empty index"))
+    except IndexUnavailable as exc:
+        if strict:
+            raise
+        return _index_unchecked(path, computed_sha1, exc)
 
     # CHD containers never match on raw file bytes, chdman compresses and
     # wraps the original track data, so the raw md5/crc32 tiers are also
@@ -82,7 +101,12 @@ def classify(
                 matched_era=_entry_era(crc32_index[hashes.crc32]), hash_kind="crc32", issues=tuple(issues),
             )
 
-    match = fuzzy_title_match(title, era, _INDEX_PATH, threshold=threshold)
+    try:
+        match = fuzzy_title_match(title, era, resolved_index, threshold=threshold)
+    except IndexUnavailable as exc:
+        if strict:
+            raise
+        return _index_unchecked(path, computed_sha1, exc)
     if match is not None:
         matched_title, similarity = match
         return ClassifyResult(
@@ -99,6 +123,17 @@ def classify(
         status="not_in_index", computed_sha1=computed_sha1, matched_title=None, similarity=None,
         reason="no sha1/md5/crc32 match and no confident title match in hash_index.json",
         issues=tuple(issues),
+    )
+
+
+def _index_unchecked(path: Path, computed_sha1: str, exc: IndexUnavailable) -> ClassifyResult:
+    """The "unchecked" result for an unusable index: the file hashed fine, so
+    computed_sha1 is kept. Logged once per backoff window like detect()."""
+    reason = f"hash index unavailable: {one_line(str(exc))}"
+    _hash_lookup._report_index_failure(f"{reason} (while classifying {str(path)!r})")
+    return ClassifyResult(
+        status="unchecked", computed_sha1=computed_sha1, matched_title=None, similarity=None,
+        reason=reason, issues=(Issue(INDEX_UNAVAILABLE, reason),),
     )
 
 

@@ -10,7 +10,11 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import Callable
 
+from ..index_errors import IndexUnavailable
+from ..index_path import INDEX_PATH_ENV, resolve_index_path
+from . import hash_lookup
 from .dat_parser import parse_dat
 
 logger = logging.getLogger(__name__)
@@ -25,7 +29,9 @@ def _load_existing(output_path: Path) -> dict:
         return json.load(fh)
 
 
-def _write_index_atomically(index: dict, output_path: Path) -> None:
+def _write_index_atomically(
+    index: dict, output_path: Path, *, before_replace: Callable[[], None] | None = None,
+) -> None:
     """Serialise *index* to a sibling temp file, then os.replace() it into place.
 
     - A crash or full disk during a direct write would leave the index
@@ -35,6 +41,9 @@ def _write_index_atomically(index: dict, output_path: Path) -> None:
       the old complete index or the new one.
     - The temp file goes in the destination directory so the rename
       cannot cross a filesystem boundary.
+    - *before_replace*, if given, runs after the temp file is complete and
+      just before the rename. An exception from it aborts the write and
+      leaves the destination untouched.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
@@ -46,10 +55,58 @@ def _write_index_atomically(index: dict, output_path: Path) -> None:
             json.dump(index, fh, indent=2, ensure_ascii=False)
             fh.flush()
             os.fsync(fh.fileno())
+        if before_replace is not None:
+            before_replace()
         os.replace(tmp_path, output_path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def _remove_stale_sidecar(output_path: Path) -> None:
+    """Delete the provenance sidecar next to the cache index before it is
+    overwritten, so the index built here is not later judged a modified
+    managed download and quarantined. Removed before the rename, not after:
+    a reader between the two then sees an unrecorded (user-supplied) file
+    rather than a changed one with a stale record. Only called for the cache
+    path; a sidecar next to any other output is not ours to touch."""
+    hash_lookup._sidecar_path(output_path).unlink(missing_ok=True)
+
+
+def _is_cache_location(output_path: Path) -> bool:
+    """True if *output_path* names the default cache file, also when spelled
+    differently (relative, "..", a symlinked directory). The runtime treats
+    such an alias as user-supplied, but the cache file it reaches would still
+    be judged by its stale sidecar when loaded through the default path."""
+    if hash_lookup.is_default_cache_path(output_path.absolute()):
+        return True
+    try:
+        return output_path.resolve() == hash_lookup.default_index_path().resolve()
+    except (OSError, RuntimeError, IndexUnavailable):
+        return False
+
+
+def _runtime_hint(output_path: Path) -> list[str]:
+    """Lines saying where the runtime reads the index and how to use the
+    result written to *output_path*."""
+    try:
+        runtime_path = resolve_index_path()
+    except IndexUnavailable as exc:
+        return [
+            f"Runtime reads:   unknown ({exc})",
+            f"To use this index: set {INDEX_PATH_ENV}={output_path} or pass index_path={str(output_path)!r} "
+            "to detect()/classify()/verify().",
+        ]
+    lines = [f"Runtime reads:   {runtime_path}"]
+    if output_path.absolute() == runtime_path:
+        lines.append("This is the path formatscout reads, so it is already in use.")
+    else:
+        lines.append(
+            f"To use this index: set {INDEX_PATH_ENV}={output_path}, pass "
+            f"index_path={str(output_path)!r} to detect()/classify()/verify(), "
+            f"or rebuild with --output {runtime_path}."
+        )
+    return lines
 
 
 def main() -> None:
@@ -133,13 +190,21 @@ def main() -> None:
                 dat_path.name, file_skipped,
             )
 
-    _write_index_atomically(index, output_path)
+    _write_index_atomically(
+        index, output_path,
+        before_replace=(
+            (lambda: _remove_stale_sidecar(output_path))
+            if _is_cache_location(output_path) else None
+        ),
+    )
 
     print(f"Files parsed:    {files_parsed}")
     print(f"Entries added:   {entries_added}")
     print(f"Records skipped (no sha1): {skipped_no_sha1}")
     print(f"Total index size: {len(index)} (was {prior_size})")
     print(f"Written to:      {output_path}")
+    for line in _runtime_hint(output_path):
+        print(line)
 
     if skipped_no_sha1:
         logger.warning(

@@ -3,14 +3,20 @@ from pathlib import Path
 
 from .constants import CD_SIZE_THRESHOLD_BYTES
 from .hashing import hash_lookup as _hash_lookup
+from .index_errors import INDEX_UNAVAILABLE, IndexUnavailable
+from .index_path import coerce_index_path, resolve_index_path
 from .magic.magic_detect import detect_from_magic, magic_tags
 from .result import Issue, Method, ScanResult, Status
 from .validators import bin_validator
 from .iso_detect import detect_iso, detect_cue, detect_chd, detect_from_pvd
 from .exe_detect import detect_exe
 from .directory_detect import detect_directory
+from .utils.text import one_line as _one_line
 
-_INDEX_PATH = _hash_lookup.default_index_path()
+# Override hook for the index path (None: explicit argument, then
+# FORMATSCOUT_INDEX_PATH, then the default cache; see index_path.py). The test
+# suite points it at a tmp path; leave it None in application code.
+_INDEX_PATH: Path | None = None
 
 log = logging.getLogger(__name__)
 
@@ -48,20 +54,6 @@ def _compute_requires_install(path: Path, era: str | None) -> bool:
 
 # ── Index-failure warning ────────────────────────────────────────────────────
 
-_MAX_WARNING_REASON_CHARS = 120
-
-
-def _one_line(text: str) -> str:
-    """*text* as a single printable line of at most _MAX_WARNING_REASON_CHARS."""
-    # Control characters (newlines, ESC, ...) become spaces so a message that
-    # embeds server or OS text cannot inject terminal escapes or extra lines.
-    printable = "".join(ch if ch.isprintable() else " " for ch in text)
-    line = " ".join(printable.split())
-    if len(line) > _MAX_WARNING_REASON_CHARS:
-        line = line[:_MAX_WARNING_REASON_CHARS - 3] + "..."
-    return line
-
-
 def _index_unavailable_warning(exc: Exception) -> str:
     """One-line ScanResult warning for a hash-tier failure caused by the index
     (not by the input file): offline mode, download backoff or failure, or an
@@ -71,13 +63,23 @@ def _index_unavailable_warning(exc: Exception) -> str:
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> ScanResult:
+def detect(
+    path: Path, dir_cache: dict[Path, list[Path]] | None = None, *, index_path: "Path | str | None" = None,
+) -> ScanResult:
     """dir_cache: optional, caller-owned {parent_dir: entries} map threaded down
     to bin_validator._find_cue. Pass one dict across repeated calls in a single
     scan pass (e.g. many .bin files in one directory) to avoid rescanning the
-    same directory per file. None (default) preserves prior per-call behavior."""
+    same directory per file. None (default) preserves prior per-call behavior.
+
+    index_path: keyword-only, the hash index to use instead of the
+    FORMATSCOUT_INDEX_PATH / default-cache resolution (see index_path.py). An
+    index that cannot be used never makes detect() raise: the hash tier is
+    skipped and the result carries a warning plus an INDEX_UNAVAILABLE issue.
+    Only a malformed index_path argument (wrong type, empty string) raises
+    TypeError/ValueError."""
+    explicit_index = coerce_index_path(index_path)
     try:
-        return _detect(path, dir_cache)
+        return _detect(path, dir_cache, explicit_index)
     except Exception as exc:
         log.warning("Unexpected error during media detection for '%s': %s", path, exc, exc_info=True)
         return ScanResult(
@@ -93,7 +95,9 @@ def detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> ScanR
         )
 
 
-def _detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> ScanResult:
+def _detect(
+    path: Path, dir_cache: dict[Path, list[Path]] | None = None, index_path: Path | None = None,
+) -> ScanResult:
     if not path.exists():
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
@@ -109,11 +113,11 @@ def _detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> Scan
     index_warning: str | None = None
     if path.is_file():
         try:
-            result = _hash_lookup.lookup(path, _INDEX_PATH)
+            result = _hash_lookup.lookup(path, resolve_index_path(index_path, override=_INDEX_PATH))
             if result is not None and result.era is not None:
                 result.requires_install = _compute_requires_install(path, result.era)
                 return result
-        except _hash_lookup._IndexUnavailableError as exc:
+        except IndexUnavailable as exc:
             # The index itself could not be obtained or trusted: surface it on
             # the result so callers can tell "no hash match" from "hash tier
             # did not run". The warning is attached once, after the heuristic
@@ -146,8 +150,8 @@ def _detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> Scan
     result.requires_install = _compute_requires_install(path, result.era)
     if index_warning is not None and index_warning not in result.warnings:
         result.warnings.append(index_warning)
-    if index_warning is not None and all(issue.code != "index_unavailable" for issue in result.issues):
-        result.issues += (Issue("index_unavailable", index_warning),)
+    if index_warning is not None and all(issue.code != INDEX_UNAVAILABLE for issue in result.issues):
+        result.issues += (Issue(INDEX_UNAVAILABLE, index_warning),)
     return result
 
 

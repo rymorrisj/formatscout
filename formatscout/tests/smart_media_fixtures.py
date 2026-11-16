@@ -44,15 +44,15 @@ def _synthetic_sha1(label: str) -> str:
 
 
 def patch_classify_index(monkeypatch, index_path: Path) -> None:
-    """Points classify.py's module-level _INDEX_PATH constant at *index_path*
-    for the duration of one test.
+    """Points classify.py's module-level _INDEX_PATH override hook at
+    *index_path* for the duration of one test.
 
-    classify() has no index-path parameter of its own, unlike
-    fuzzy_title_match()/hash_lookup.lookup(), which both take index_path
-    directly, classify() always reads its own private _INDEX_PATH module
-    constant (pointing at the real hash_index.json). Monkeypatching that
-    constant is the only way to run classify() against a synthetic index
-    without touching the real 88MB file.
+    The hook (None in production: explicit index_path=, then
+    FORMATSCOUT_INDEX_PATH, then the default cache) outranks the environment
+    variable and the default, so a test using it never reaches the real
+    ~88MB hash_index.json. Tests of classify(index_path=...) itself pass the
+    argument instead (and set the hook to None or leave it, as the argument
+    wins).
     """
     import formatscout.classify
     classify_module = sys.modules["formatscout.classify"]
@@ -61,7 +61,7 @@ def patch_classify_index(monkeypatch, index_path: Path) -> None:
 
 
 def patch_verify_index(monkeypatch, index_path: Path) -> None:
-    """Points verify.py's own module-level _INDEX_PATH constant at *index_path*,
+    """Points verify.py's own module-level _INDEX_PATH override hook at *index_path*,
     same rationale and pattern as patch_classify_index(). verify.py declares its
     own private _INDEX_PATH separate from classify.py's, so it needs its own patch.
     """
@@ -72,7 +72,7 @@ def patch_verify_index(monkeypatch, index_path: Path) -> None:
 
 
 def patch_detector_index(monkeypatch, index_path: Path) -> None:
-    """Points detector.py's module-level _INDEX_PATH constant at *index_path*,
+    """Points detector.py's module-level _INDEX_PATH override hook at *index_path*,
     same rationale as patch_classify_index()/patch_verify_index(). Needed
     whenever a test drives detect() itself (as opposed to detect_directory()
     or another dispatch target directly) on a directory: detect()'s Tier-1

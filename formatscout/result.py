@@ -265,14 +265,29 @@ class VerifyResult:
         "mismatched", computed sha1 is in the hash index but differs from
             expected_sha1. In practice this means the file is a different
             indexed file.
+        "unchecked", the file hashed fine but the hash index could not be
+            obtained or used (offline mode, download backoff or failure, an
+            oversized or corrupt index, an unreadable index file), so no
+            comparison was possible; computed_sha1 is still set. issues holds
+            an INDEX_UNAVAILABLE issue. verify(strict=True) raises
+            IndexUnavailable instead. A file that cannot be read still raises
+            OSError.
 
     The hash is over the raw file bytes, including for .chd files. The
     embedded CHD rawsha1 is not used here.
+
+    issues: keyword-only, defaulted. Issue(code, message) tuples; today only
+    "INDEX_UNAVAILABLE" for "unchecked".
     """
-    status: Literal["matched", "mismatched", "not_in_index"]
+    status: Literal["matched", "mismatched", "not_in_index", "unchecked"]
     computed_sha1: str
     expected_sha1: str
     reason: str
+    _: KW_ONLY
+    issues: tuple[Issue, ...] = ()
+
+    def __post_init__(self) -> None:
+        self.issues = tuple(Issue(*issue) for issue in self.issues)
 
 
 @dataclass(slots=True)
@@ -302,14 +317,18 @@ class ClassifyResult:
             produce this state.
         "not_in_index", no hash matched and no confident title match either.
             Neutral, "we have no data on this file", not a warning.
-        "unchecked", the file could not be hashed at all (missing, unreadable,
-            permission error). No classification was possible. Only an OSError
-            from hashing produces this state. Index download and index JSON
-            errors are not caught here and propagate to the caller.
+        "unchecked", no classification was possible, for one of two reasons
+            that the issue code tells apart. "hash_failed": the file could not
+            be hashed at all (missing, unreadable, permission error); only an
+            OSError from hashing produces this. "INDEX_UNAVAILABLE": the file
+            hashed fine but the hash index could not be obtained or used
+            (offline mode, download backoff or failure, an oversized or
+            corrupt index, an unreadable index file). classify(strict=True)
+            raises IndexUnavailable for the latter instead of returning it.
 
     computed_sha1 is the file's own raw sha1 (hash_file()'s result), persisted
     whenever hashing succeeds, regardless of which status was reached. It is
-    None only for "unchecked". This is not the embedded CHD rawsha1 used
+    None only for "unchecked" with a "hash_failed" issue. This is not the embedded CHD rawsha1 used
     internally for the verified-tier lookup, a caller needing that value
     should use validators.chd_validator.extract_embedded_sha1 directly.
 
@@ -327,10 +346,10 @@ class ClassifyResult:
     hash_kind: which hash matched: "sha1" (the file's own sha1),
         "chd_rawsha1" (a CHD header's embedded rawsha1), "md5" or "crc32".
         None when no hash matched.
-    issues: Issue(code, message) tuples: "hash_failed" for "unchecked",
-        "index_missing" when a missing custom index file was treated as
-        empty, "chd_rawsha1_missing" when a .chd had no usable embedded
-        rawsha1 and its raw file sha1 was looked up instead.
+    issues: Issue(code, message) tuples: "hash_failed" or "INDEX_UNAVAILABLE"
+        for "unchecked", "index_missing" when a missing custom index file was
+        treated as empty, "chd_rawsha1_missing" when a .chd had no usable
+        embedded rawsha1 and its raw file sha1 was looked up instead.
     """
     status: Literal["verified", "caution", "mismatch", "not_in_index", "unchecked"]
     computed_sha1: str | None

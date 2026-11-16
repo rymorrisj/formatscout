@@ -1079,9 +1079,37 @@ class TestFailureLogging:
 
 
 class TestClassifyVerifyContract:
-    """Index acquisition errors still escape classify() and verify()."""
+    """Index acquisition errors become status="unchecked" in classify() and
+    verify() (strict=True re-raises); see test_index_api.py for the full
+    contract."""
 
-    def test_classify_propagates_index_unavailable(self, env: _Env, tmp_path: Path, monkeypatch):
+    def test_classify_reports_index_unavailable_as_unchecked(self, env: _Env, tmp_path: Path, monkeypatch):
+        from formatscout.classify import classify
+
+        fx.patch_classify_index(monkeypatch, env.index_path)
+        monkeypatch.setenv(hash_lookup._OFFLINE_ENV, "1")
+        path = tmp_path / "game.bin"
+        path.write_bytes(fx.VERIFIED_CONTENT)
+
+        result = classify(path, "Some Title", "ps1")
+
+        assert result.status == "unchecked"
+        assert [issue.code for issue in result.issues] == ["INDEX_UNAVAILABLE"]
+
+    def test_verify_reports_index_unavailable_as_unchecked(self, env: _Env, tmp_path: Path, monkeypatch):
+        from formatscout.verify import verify
+
+        fx.patch_verify_index(monkeypatch, env.index_path)
+        monkeypatch.setenv(hash_lookup._OFFLINE_ENV, "1")
+        path = tmp_path / "game.bin"
+        path.write_bytes(fx.VERIFIED_CONTENT)
+
+        result = verify(path, "0" * 40)
+
+        assert result.status == "unchecked"
+        assert [issue.code for issue in result.issues] == ["INDEX_UNAVAILABLE"]
+
+    def test_classify_strict_propagates_index_unavailable(self, env: _Env, tmp_path: Path, monkeypatch):
         from formatscout.classify import classify
 
         fx.patch_classify_index(monkeypatch, env.index_path)
@@ -1090,9 +1118,9 @@ class TestClassifyVerifyContract:
         path.write_bytes(fx.VERIFIED_CONTENT)
 
         with pytest.raises(_IndexUnavailableError):
-            classify(path, "Some Title", "ps1")
+            classify(path, "Some Title", "ps1", strict=True)
 
-    def test_verify_propagates_index_unavailable(self, env: _Env, tmp_path: Path, monkeypatch):
+    def test_verify_strict_propagates_index_unavailable(self, env: _Env, tmp_path: Path, monkeypatch):
         from formatscout.verify import verify
 
         fx.patch_verify_index(monkeypatch, env.index_path)
@@ -1101,7 +1129,7 @@ class TestClassifyVerifyContract:
         path.write_bytes(fx.VERIFIED_CONTENT)
 
         with pytest.raises(_IndexUnavailableError):
-            verify(path, "0" * 40)
+            verify(path, "0" * 40, strict=True)
 
     def test_missing_custom_index_still_degrades_to_empty(self, env: _Env, tmp_path: Path, monkeypatch):
         from formatscout.classify import classify

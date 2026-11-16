@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "formatscout"
-version = "0.1.4"
+version = "0.2.0"
 description = "Multi-tier disk image and directory format/platform/era detector (hash, magic-byte, structural, directory heuristics, extension fallback), including Xbox xISO/DVD-rip identification as one of its ISO-tier signals."
 readme = "README.md"
 license = "MIT"
