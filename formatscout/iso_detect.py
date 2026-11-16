@@ -11,6 +11,7 @@ from .constants import (
 )
 from .iso9660_dir import iter_dir_records
 from .utils.pointer_file import read_capped_lines
+from .utils.safe_path import rejection_warning, resolve_pointer
 from .xbox_image import detect_xbox_image_type
 from .magic.magic_detect import detect_from_magic
 from .result import ScanResult, null_scan_result
@@ -55,11 +56,37 @@ def detect_iso(path: Path) -> ScanResult:
 
 
 def detect_cue(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> ScanResult:
-    bin_path = _cue_bin_path(path)
+    """Detect a .cue sheet by resolving the .bin it references.
+
+    FILE targets go through utils.safe_path.resolve_pointer(); a rejected
+    target contributes no signal and is never opened, and its
+    "pointer rejected: ..." warning is appended to whichever result is
+    returned. The same-stem sibling .bin fallback goes through
+    resolve_pointer() too: a <stem>.bin that is a FIFO, a directory or a
+    symlink leaving the cue's directory is rejected and never opened.
+    """
+    pointer_warnings: list[str] = []
+    result = _detect_cue(path, dir_cache, pointer_warnings)
+    result.warnings.extend(pointer_warnings)
+    return result
+
+
+def _detect_cue(
+    path: Path,
+    dir_cache: dict[Path, list[Path]] | None,
+    pointer_warnings: list[str],
+) -> ScanResult:
+    bin_path = _cue_bin_path(path, pointer_warnings)
     if bin_path is None:
-        candidate = path.with_suffix(".bin")
-        if candidate.exists():
-            bin_path = candidate
+        sibling_name = path.with_suffix(".bin").name
+        sibling = resolve_pointer(path.parent, sibling_name)
+        if sibling.ok:
+            bin_path = sibling.path
+        elif sibling.status == "rejected":
+            message = rejection_warning(sibling_name, sibling.reason or "rejected")
+            # A FILE line naming the same sibling already produced this text.
+            if message not in pointer_warnings:
+                pointer_warnings.append(message)
     if bin_path is None:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
@@ -248,16 +275,31 @@ def _iso_size_fallback(path: Path, *, iso9660_confirmed: bool = False) -> ScanRe
     return ScanResult(title=None, platform=None, era=None, confidence=0.0, reason="no signal found")
 
 
-def _cue_bin_path(cue_path: Path) -> Path | None:
+def _cue_bin_path(cue_path: Path, warnings: list[str] | None = None) -> Path | None:
+    """Return the resolved path of the first quoted FILE target in the cue
+    sheet that exists inside the cue's directory, or None.
+
+    Each target is checked by resolve_pointer() before anything touches it.
+    A rejected target is skipped (never opened or stat-ed) and, when
+    *warnings* is given, a "pointer rejected: ..." message is appended to it
+    (otherwise it is logged). A target that is simply absent is skipped
+    silently, as before.
+    """
     try:
         for line in read_capped_lines(cue_path):
             line = line.strip()
             if line.upper().startswith("FILE "):
                 parts = line.split('"')
                 if len(parts) >= 2:
-                    candidate = cue_path.parent / parts[1]
-                    if candidate.exists():
-                        return candidate
+                    resolution = resolve_pointer(cue_path.parent, parts[1])
+                    if resolution.ok:
+                        return resolution.path
+                    if resolution.status == "rejected":
+                        message = rejection_warning(parts[1], resolution.reason or "rejected")
+                        if warnings is not None:
+                            warnings.append(message)
+                        else:
+                            logger.warning("%s", message)
         return None
     except (OSError, struct.error, UnicodeDecodeError) as exc:
         logger.debug("Failed to parse cue sheet %s: %s", cue_path, exc)

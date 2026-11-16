@@ -6,6 +6,7 @@ from .constants import DIRECTORY_DEPTH2_SCAN_CAP_ENTRIES
 from .exe_detect import _classify_pe_header
 from .result import ScanResult, null_scan_result
 from .utils.pointer_file import read_capped_lines
+from .utils.safe_path import rejection_warning, resolve_pointer
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +15,17 @@ _DOS_TOOLS = frozenset({"DEICE.EXE", "PKUNZIP.EXE", "PKUNZIP.COM", "LZMA.EXE"})
 
 
 def detect_directory(path: Path) -> ScanResult:
+    """AUTORUN.INF tier first, then the marker-file/depth-2 heuristics.
+
+    Warnings from a no-signal AUTORUN.INF result (e.g. a rejected OPEN=/RUN=
+    pointer) are carried onto the heuristic result rather than dropped.
+    """
     result = _detect_from_autorun(path)
     if result.era is not None:
         return result
-    return _detect_from_directory(path)
+    fallback = _detect_from_directory(path)
+    fallback.warnings.extend(result.warnings)
+    return fallback
 
 
 def _detect_from_autorun(root: Path) -> ScanResult:
@@ -34,10 +42,16 @@ def _detect_from_autorun(root: Path) -> ScanResult:
         exe_rel = _parse_autorun_exe(autorun)
         if exe_rel is None:
             return _null
-        exe_path = root / exe_rel.replace("\\", "/")
-        if not exe_path.is_file():
+        # The OPEN=/RUN= value is untrusted: resolve_pointer() rejects
+        # absolute, "..", UNC, drive, device and ADS forms before any
+        # filesystem call, and only its resolved path is opened.
+        resolution = resolve_pointer(root, exe_rel)
+        if resolution.status == "rejected":
+            _null.warnings.append(rejection_warning(exe_rel, resolution.reason or "rejected"))
             return _null
-        return _detect_from_pe(exe_path)
+        if resolution.path is None:
+            return _null
+        return _detect_from_pe(resolution.path)
     except Exception as exc:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,

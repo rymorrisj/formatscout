@@ -31,7 +31,9 @@ class TestCueBinPath:
         cue = tmp_path / "game.cue"
         cue.write_text(f'FILE "{bin_file.name}" BINARY\n  TRACK 01 MODE2/2352\n')
         result = self._call(cue)
-        assert result == bin_file
+        # _cue_bin_path() returns the strictly resolved target (see
+        # utils/safe_path.py), not the raw join.
+        assert result == bin_file.resolve()
 
     def test_falls_through_to_second_file_when_first_missing(self, tmp_path: Path):
         """The primary regression test: first FILE entry points to a nonexistent
@@ -51,7 +53,7 @@ class TestCueBinPath:
         cue.write_text(cue_content)
 
         result = self._call(cue)
-        assert result == real_bin, (
+        assert result == real_bin.resolve(), (
             "_cue_bin_path() must return the second FILE entry when the first "
             "does not exist on disk"
         )
