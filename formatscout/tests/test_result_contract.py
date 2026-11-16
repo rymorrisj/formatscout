@@ -329,7 +329,7 @@ class TestHashLookupSites:
         "content, method, status, authoritative",
         [
             (fx.VERIFIED_CONTENT, Method.HASH_SHA1, Status.IDENTIFIED, True),
-            (fx.CAUTION_MD5_CONTENT, Method.HASH_MD5, Status.IDENTIFIED, True),
+            (fx.CAUTION_MD5_CONTENT, Method.HASH_MD5, Status.GUESS, False),
             (fx.CAUTION_CRC32_CONTENT, Method.HASH_CRC32, Status.GUESS, False),
         ],
     )
@@ -342,8 +342,10 @@ class TestHashLookupSites:
         chd = _write(tmp_path / "g.chd", fx.build_synthetic_chd(fx.CHD_EMBEDDED_SHA1))
         result = hash_lookup.lookup(chd, fx.write_synthetic_index(tmp_path))
         assert result is not None and result.era == "dreamcast"
-        _tags(result, Method.CHD_HEADER_CLAIM, Status.IDENTIFIED, True)
+        # A header hash is a forgeable claim, never proof: guess, not authoritative.
+        _tags(result, Method.CHD_HEADER_CLAIM, Status.GUESS, False)
         assert result.container == "chd"
+        assert result.confidence == 1.0
 
     def test_entry_without_era_is_unsupported(self, tmp_path: Path):
         content = b"eraless synthetic content"

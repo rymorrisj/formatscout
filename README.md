@@ -134,23 +134,23 @@ hashes.sha1, hashes.md5, hashes.crc32
 
 ### Result contract
 
-Use `status` and `authoritative`, not "is `era` None", to interpret a `ScanResult`. `era`, `confidence`, `reason` and `warnings` are unchanged: `era` is populated exactly as before, guesses included (a CHD CHTR/CHT2 size guess at 0.3, a `.img` under 800 MiB as `dos` at 0.35, extension-only matches at 0.5 to 0.7, a crc32 index hit at 0.75). The new fields are keyword-only with defaults, so positional construction of `ScanResult` still works.
+Use `status` and `authoritative`, not "is `era` None", to interpret a `ScanResult`. `era`, `confidence`, `reason` and `warnings` are unchanged: `era` is populated exactly as before, guesses included (a CHD CHTR/CHT2 size guess at 0.3, a `.img` under 800 MiB as `dos` at 0.35, extension-only matches at 0.5 to 0.7, a crc32 index hit at 0.75, an md5 hit at 0.85, a CHD header hash hit at 1.0). The new fields are keyword-only with defaults, so positional construction of `ScanResult` still works.
 
 | `status` | `era` | Meaning |
 |---|---|---|
 | `identified` | set | Determined from proof; `authoritative` is True. |
-| `guess` | set | **Transitional.** Set from a heuristic (size threshold, extension, directory marker, PE OS version, volume label, SYSTEM.CNF default, crc32 hit). Exists only because `era` still carries guesses, and will be removed once it stops doing so. |
+| `guess` | set | **Transitional.** Set from a heuristic (size threshold, extension, directory marker, PE OS version, volume label, SYSTEM.CNF default, CHD header hash claim, md5 or crc32 hit). Exists only because `era` still carries guesses, and will be removed once it stops doing so. |
 | `ambiguous` | None | The signal narrows to a few eras, listed in `candidates`. |
 | `container_only` | None | Container or filesystem confirmed (`iso9660`, `chd`, `bin_cue`), but no platform. |
 | `unsupported` | None | Recognised but not mapped to an era (`.nds`, an index entry with no era, a path that is neither file nor directory). |
 | `no_signal` | None | Nothing usable found. |
 | `error` | None | The input could not be examined (missing path, read or parse error, the `detect()` catch-all). |
 
-`authoritative` is True only for a sha1 or md5 index hit, a CHD header `rawsha1` index hit, and a platform-unique magic signature (Dreamcast IP.BIN, N64, iNES). Everything else is not authoritative, including the XDVDFS magic (shared by Xbox 360), PS3_DISC.SFB by name, the CHD CHGD tag (also used by NAOMI GD-ROMs) and SYSTEM.CNF (any readable file without BOOT2 reads as PS1). It is always False when `era` is None.
+`authoritative` is True only for a sha1 index hit on a non-CHD file's own bytes and a platform-unique magic signature (Dreamcast IP.BIN, N64, iNES). A CHD header `rawsha1` hit is a claim, not proof: the header is forgeable and is not checked against the hunks, so it is `guess`. An md5 hit is corroboration only until the index stores file sizes, so it is `guess` too (crc32 is likewise `guess`). Everything else is not authoritative, including the XDVDFS magic (shared by Xbox 360), PS3_DISC.SFB by name, the CHD CHGD tag (also used by NAOMI GD-ROMs) and SYSTEM.CNF (any readable file without BOOT2 reads as PS1). It is always False when `era` is None.
 
 Other fields, all defaulted:
 
-- `method`: the rule that produced the result. One of `hash_sha1`, `hash_md5`, `hash_crc32`, `chd_header_claim` (index hit on the CHD header's embedded `rawsha1`, not checked against the hunks), `magic`, `structural`, `system_cnf`, `directory_marker`, `pe_header`, `extension`, `size_heuristic`, `none` (no rule produced a signal).
+- `method`: the rule that produced the result. One of `hash_sha1`, `hash_md5`, `hash_crc32`, `chd_header_claim` (index hit on the CHD header's embedded `rawsha1`: a claim, not checked against the hunks), `magic`, `structural`, `system_cnf`, `directory_marker`, `pe_header`, `extension`, `size_heuristic`, `none` (no rule produced a signal).
 - `container`: `iso9660`, `xdvdfs`, `chd` or `bin_cue` when confirmed, else None.
 - `candidates`: `Candidate(era, tier, evidence)` tuples for `ambiguous` results.
 - `evidence`: short stable codes for the specific signals, such as `pvd_volume_label_keyword`.

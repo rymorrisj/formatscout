@@ -521,10 +521,13 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
                    title, never proof. Do not use this tier to
                    authenticate a file or to make an unsafe decision.
 
-    Result tags (see _hit()): sha1, md5 and the CHD embedded rawsha1 are
-    authoritative when the entry has an era; crc32 never is. An entry
-    without an era yields status "unsupported" (detect() falls through on
-    those).
+    Result tags (see _hit()): only a sha1 hit on a non-CHD file is
+    authoritative (and only when the entry has an era). The CHD embedded
+    rawsha1 is a claim read from a forgeable header and is never checked
+    against the hunks; md5 is corroboration only (the index stores no file
+    sizes yet, so a collision cannot be ruled out); crc32 is a hint. Those
+    three yield status "guess". An entry without an era yields status
+    "unsupported" (detect() falls through on those).
     """
     index, md5_index, crc32_index = load_index(index_path)
     if not index:
@@ -543,7 +546,7 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
             return None
         return _hit(
             entry, 1.0, f"sha1 match (CHD embedded rawsha1): {embedded_sha1}",
-            Method.CHD_HEADER_CLAIM, proof=True, container="chd", evidence=("chd_embedded_rawsha1",),
+            Method.CHD_HEADER_CLAIM, proof=False, container="chd", evidence=("chd_embedded_rawsha1",),
         )
 
     hashes = hash_file(path)
@@ -554,7 +557,7 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
 
     entry = md5_index.get(hashes.md5)
     if entry is not None:
-        return _hit(entry, 0.85, f"md5 match: {hashes.md5}", Method.HASH_MD5, proof=True)
+        return _hit(entry, 0.85, f"md5 match: {hashes.md5}", Method.HASH_MD5, proof=False)
 
     entry = crc32_index.get(hashes.crc32)
     if entry is not None:
@@ -570,9 +573,9 @@ def _hit(
     """ScanResult for an index hit on *entry*.
 
     era is the entry's own value, unchanged. *proof* says whether this hash
-    kind identifies the file (sha1, md5, CHD rawsha1) or only hints at it
-    (crc32); it makes the result authoritative only when the entry has an
-    era. An era-less entry (e.g. the unmapped "IBM - PC compatible" bucket)
+    kind identifies the file (only a sha1 of the file's own bytes) or is a
+    claim or hint (CHD header rawsha1, md5, crc32); it makes the result
+    authoritative only when the entry has an era. An era-less entry (e.g. the unmapped "IBM - PC compatible" bucket)
     names a platform this package does not map to an era: "unsupported".
     """
     era = entry.get("era")

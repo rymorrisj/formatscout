@@ -467,6 +467,16 @@ def _hand_written() -> list[Case]:
             expect_method=Method.HASH_SHA1, expect_authoritative=True,
         ),
         Case(
+            "hash_md5_hit_is_not_authoritative", file_of(fx.CAUTION_MD5_CONTENT), "game.bin", "ps1",
+            index=lambda d: fx.write_synthetic_index(d),
+            expect_method=Method.HASH_MD5, expect_authoritative=False,
+        ),
+        Case(
+            "hash_chd_header_claim_is_not_authoritative", file_of(fx.build_synthetic_chd(fx.CHD_EMBEDDED_SHA1)), "dc.chd",
+            "dreamcast", index=lambda d: fx.write_synthetic_index(d),
+            expect_method=Method.CHD_HEADER_CLAIM, expect_authoritative=False,
+        ),
+        Case(
             "hash_index_hit_without_era_falls_through", file_of(ps1_bin), "game.bin", "ps1",
             index=lambda d: index.write_index_v1(
                 d / "index.json", [index.entry_for(ps1_bin, title="Eraless (USA)", era=None)],

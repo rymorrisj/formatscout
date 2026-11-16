@@ -33,7 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `platform_hint`; `ClassifyResult` gains `matched_era`, `hash_kind` and
   `issues`. New exports `Status`, `Method`, `Tier`, `Candidate`, `Issue`,
   `HashKind` and `tier_for_confidence`. A `ScanResult` with contradictory
-  values raises `ValueError`. See the README's Result contract section.
+  values raises `ValueError`. `authoritative` is True only for a sha1 index hit
+  on a non-CHD file and a platform-unique magic signature: a CHD header
+  `rawsha1` hit is a forgeable claim and an md5 hit is corroboration only
+  until the index stores sizes, so both are `guess` (era, confidence and
+  reason are unchanged). See the README's Result contract section.
 
 ### Changed
 - `classify()` and `verify()` no longer raise by default when the index is

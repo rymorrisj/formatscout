@@ -171,9 +171,12 @@ class ScanResult:
         carrying guesses.
     method: a Method naming the rule that produced the result (none when no
         rule produced a signal).
-    authoritative: True only when era was determined from proof (a sha1/md5
-        index hit, a CHD header rawsha1 index hit, a platform-unique magic
-        signature). Always False when era is None.
+    authoritative: True only when era was determined from proof (a sha1 index
+        hit on a non-CHD file's own bytes, a platform-unique magic signature).
+        A CHD header rawsha1 hit is a claim (the header is forgeable and not
+        checked against the hunks) and an md5 hit is corroboration only (the
+        index stores no sizes yet), so both are False. Always False when era
+        is None.
     container: the confirmed container/filesystem, when one was confirmed:
         "iso9660", "xdvdfs", "chd" or "bin_cue". None otherwise.
     candidates: for ambiguous results, the eras the signal narrows to, as
