@@ -16,6 +16,10 @@ resolve_pointer() is the single entry point. It runs in two stages:
 
 Callers must open only PointerResolution.path afterwards, never a path they
 rebuild from the raw string. No exception escapes resolve_pointer().
+
+root_relative=True (AUTORUN.INF OPEN=/RUN= only) treats exactly one leading
+separator as "the disc root", i.e. the base directory. Cue FILE targets never
+pass it, so a leading separator there is still rejected as absolute.
 """
 
 import re
@@ -30,6 +34,10 @@ MAX_COMPONENT_LENGTH = 255
 WARNING_VALUE_MAX_CHARS = 120
 
 _SEPARATORS = re.compile(r"[\\/]")
+_SEPARATOR_CHARS = ("\\", "/")
+# Any two leading separators: a UNC share, a \\?\ or \\.\ device path, or a
+# mixed-slash form Windows treats the same way.
+_UNC_PREFIXES = ("\\\\", "//", "\\/", "/\\")
 
 # Windows reserved device names. A component is a device if its part before
 # the first "." (trailing spaces stripped, case-insensitive) is one of these,
@@ -105,12 +113,36 @@ def _is_device_name(component: str) -> bool:
     return component.split(".", 1)[0].rstrip(" ").upper() in _DEVICE_NAMES
 
 
-def validate_pointer_lexically(raw: str) -> str | None:
+def validate_pointer_lexically(raw: str, *, root_relative: bool = False) -> str | None:
     """Return a short rejection reason for *raw*, or None if it is acceptable.
 
     Pure string inspection, never touches the filesystem. Both "/" and "\\"
     are treated as separators on every platform.
+
+    With root_relative=True a single leading separator is allowed and means
+    the base directory (AUTORUN.INF's "\\SETUP.EXE" form). The overall length
+    and the doubled-separator (UNC) check run on the raw value first; every
+    other check then runs on the remainder after that one separator, so a
+    remainder that is itself absolute, a drive, "..", a device name, etc. is
+    still rejected.
     """
+    if root_relative and raw[:1] in _SEPARATOR_CHARS:
+        if len(raw) > MAX_POINTER_LENGTH:
+            return "too long"
+        if raw[:2] in _UNC_PREFIXES:
+            return "UNC path"
+        return _validate_relative(raw[1:])
+    return _validate_relative(raw)
+
+
+def _strip_root_prefix(raw: str) -> str:
+    """Drop exactly one leading separator. Only call on a value that already
+    passed validate_pointer_lexically(raw, root_relative=True)."""
+    return raw[1:] if raw[:1] in _SEPARATOR_CHARS else raw
+
+
+def _validate_relative(raw: str) -> str | None:
+    """The full lexical check set for a value that must be base-relative."""
     if not raw:
         return "empty"
     if len(raw) > MAX_POINTER_LENGTH:
@@ -119,9 +151,9 @@ def validate_pointer_lexically(raw: str) -> str | None:
         return "NUL byte"
     if any(_is_control(c) for c in raw):
         return "control character"
-    if raw[:2] in ("\\\\", "//", "\\/", "/\\"):
+    if raw[:2] in _UNC_PREFIXES:
         return "UNC path"
-    if raw[0] in "/\\":
+    if raw[0] in _SEPARATOR_CHARS:
         return "absolute path"
     if len(raw) >= 2 and raw[1] == ":" and raw[0].isalpha():
         return "drive letter"
@@ -140,8 +172,11 @@ def validate_pointer_lexically(raw: str) -> str | None:
     return None
 
 
-def resolve_pointer(base: Path, raw: str) -> PointerResolution:
+def resolve_pointer(base: Path, raw: str, *, root_relative: bool = False) -> PointerResolution:
     """Validate *raw* and resolve it against directory *base*.
+
+    root_relative=True accepts one leading separator as meaning *base* (see
+    validate_pointer_lexically()); it is for AUTORUN.INF values only.
 
     Lexical rejection happens before any filesystem call. Otherwise the
     joined path is resolved strictly (symlinks followed), must stay inside
@@ -150,11 +185,12 @@ def resolve_pointer(base: Path, raw: str) -> PointerResolution:
     loop) during resolution is a rejection, except a plain "does not exist",
     which is reported as "missing".
     """
-    reason = validate_pointer_lexically(raw)
+    reason = validate_pointer_lexically(raw, root_relative=root_relative)
     if reason is not None:
         return PointerResolution("rejected", None, reason)
 
-    parts = [p for p in _SEPARATORS.split(raw) if p not in ("", ".")]
+    relative = _strip_root_prefix(raw) if root_relative else raw
+    parts = [p for p in _SEPARATORS.split(relative) if p not in ("", ".")]
     if not parts:
         return PointerResolution("rejected", None, "no file component")
 

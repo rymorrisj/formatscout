@@ -101,6 +101,13 @@ class TestParseAutorunExe:
         autorun.write_text('[autorun]\nOPEN="SETUP.EXE"\n')
         assert self._call(autorun) == "SETUP.EXE"
 
+    def test_root_relative_value_is_returned_verbatim(self, tmp_path: Path):
+        # Parsing leaves the leading separator alone; resolve_pointer()
+        # (root_relative=True) is what maps it to the disc root.
+        autorun = tmp_path / "AUTORUN.INF"
+        autorun.write_text("[autorun]\nOPEN=\\SETUP.EXE\n")
+        assert self._call(autorun) == "\\SETUP.EXE"
+
     def test_non_exe_value_is_ignored(self, tmp_path: Path):
         autorun = tmp_path / "AUTORUN.INF"
         autorun.write_text("[autorun]\nOPEN=readme.txt\n")
@@ -165,6 +172,19 @@ class TestDetectDirectory:
 
         assert result.era == "winxp"
         assert result.confidence == 0.75
+
+    def test_root_relative_autorun_reaches_pe_detection(self, tmp_path: Path):
+        """OPEN=\\SETUP.EXE (leading backslash = disc root) is the common real
+        world form and must resolve to the exe next to AUTORUN.INF."""
+        exe_path = tmp_path / "SETUP.EXE"
+        exe_path.write_bytes(fx.build_pe_header(major_os_version=5, subsystem=3))
+        (tmp_path / "AUTORUN.INF").write_text("[autorun]\nOPEN=\\SETUP.EXE\n")
+
+        result = self._call(tmp_path)
+
+        assert result.era == "winxp"
+        assert result.confidence == 0.75
+        assert result.warnings == []
 
     def test_autorun_present_but_no_signal_falls_through_to_directory_heuristics(self, tmp_path: Path):
         """AUTORUN.INF exists but its OPEN= target is not a recognisable PE

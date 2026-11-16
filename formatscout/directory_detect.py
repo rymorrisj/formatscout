@@ -43,9 +43,11 @@ def _detect_from_autorun(root: Path) -> ScanResult:
         if exe_rel is None:
             return _null
         # The OPEN=/RUN= value is untrusted: resolve_pointer() rejects
-        # absolute, "..", UNC, drive, device and ADS forms before any
-        # filesystem call, and only its resolved path is opened.
-        resolution = resolve_pointer(root, exe_rel)
+        # "..", UNC, drive, device and ADS forms before any filesystem call,
+        # and only its resolved path is opened. root_relative=True accepts
+        # the common "\SETUP.EXE" form: one leading separator means the disc
+        # root, which is the directory holding AUTORUN.INF (root here).
+        resolution = resolve_pointer(root, exe_rel, root_relative=True)
         if resolution.status == "rejected":
             _null.warnings.append(rejection_warning(exe_rel, resolution.reason or "rejected"))
             return _null

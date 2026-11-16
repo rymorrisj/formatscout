@@ -451,13 +451,25 @@ class TestSiblingFallback:
         assert result.warnings == []
 
 
+# A single leading separator is root-relative for AUTORUN.INF (see
+# TestAutorunRootRelative), so "/x/evil.exe" is no longer a hostile case here;
+# the root-relative forms that must still be rejected are listed below.
 _AUTORUN_HOSTILE = [
     pytest.param("..\\..\\formatscout-test-nonexistent\\evil.exe", "formatscout-test-nonexistent", "parent traversal", id="parent"),
-    pytest.param("/formatscout-test-nonexistent/evil.exe", "formatscout-test-nonexistent", "absolute path", id="absolute"),
     pytest.param("\\\\example.invalid\\share\\evil.exe", "example.invalid", "UNC path", id="unc"),
+    pytest.param("//example.invalid/share/evil.exe", "example.invalid", "UNC path", id="unc_fwd"),
+    pytest.param("/\\example.invalid\\share\\evil.exe", "example.invalid", "UNC path", id="unc_mixed"),
+    pytest.param("\\\\\\formatscout-test-nonexistent\\evil.exe", "formatscout-test-nonexistent", "UNC path", id="triple_sep"),
     pytest.param("Z:\\formatscout-test-nonexistent\\evil.exe", "formatscout-test-nonexistent", "drive letter", id="drive"),
+    pytest.param("\\Z:\\formatscout-test-nonexistent\\evil.exe", "formatscout-test-nonexistent", "drive letter", id="root_drive"),
+    pytest.param("\\..\\formatscout-test-nonexistent\\evil.exe", "formatscout-test-nonexistent", "parent traversal", id="root_parent"),
+    pytest.param("/sub/../../formatscout-test-nonexistent/evil.exe", "formatscout-test-nonexistent", "parent traversal", id="root_nested_parent"),
     pytest.param("CON.exe", "CON.exe", "device name", id="device"),
+    pytest.param("\\CON.exe", "CON.exe", "device name", id="root_device"),
     pytest.param("setup.exe:stream.exe", ":stream", "colon", id="ads"),
+    pytest.param("\\setup.exe:stream.exe", ":stream", "colon", id="root_ads"),
+    pytest.param("\\set\x1bup.exe", "\x1b", "control character", id="root_control"),
+    pytest.param("\\" + "x" * MAX_POINTER_LENGTH + ".exe", "x" * 300, "too long", id="root_overlong"),
 ]
 
 
@@ -515,3 +527,140 @@ class TestAutorunContainment:
         assert result.era is None
         _assert_one_rejection(result.warnings, "escapes base directory")
         assert not any("EVIL.EXE" in p for p in opened)
+
+
+class TestAutorunRootRelative:
+    """AUTORUN.INF OPEN=/RUN= values may start with one separator, meaning
+    the disc root (the directory holding AUTORUN.INF). Cue FILE targets get
+    no such allowance."""
+
+    @pytest.mark.parametrize("raw", ["\\SETUP.EXE", "/SETUP.EXE", "\\sub\\SETUP.EXE", "/sub/SETUP.EXE"])
+    def test_lexically_accepted_only_when_root_relative(self, raw: str):
+        assert validate_pointer_lexically(raw, root_relative=True) is None
+        assert validate_pointer_lexically(raw) == "absolute path"
+
+    @pytest.mark.parametrize("raw, reason", [
+        ("\\\\host\\share", "UNC path"),
+        ("//host", "UNC path"),
+        ("\\/host", "UNC path"),
+        ("/\\host", "UNC path"),
+        ("\\\\\\x", "UNC path"),
+        ("\\\\?\\C:\\x", "UNC path"),
+        ("\\..\\x", "parent traversal"),
+        ("\\C:\\x", "drive letter"),
+        ("\\CON", "device name"),
+        ("\\sub\\nul.exe", "device name"),
+        ("\\sub\\x:y", "colon"),
+        ("\\", "empty"),
+        ("\\a\x00b", "NUL byte"),
+        ("\\a\x1fb", "control character"),
+        ("\\" + "x" * MAX_POINTER_LENGTH, "too long"),
+    ])
+    def test_lexical_rejections(self, raw: str, reason: str):
+        assert validate_pointer_lexically(raw, root_relative=True) == reason
+
+    @pytest.mark.parametrize("raw, parts", [
+        ("\\SETUP.EXE", ("SETUP.EXE",)),
+        ("/SETUP.EXE", ("SETUP.EXE",)),
+        ("\\sub\\SETUP.EXE", ("sub", "SETUP.EXE")),
+    ])
+    def test_resolves_under_base(self, tmp_path: Path, raw: str, parts: tuple[str, ...]):
+        target = tmp_path.joinpath(*parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"MZ")
+
+        resolution = resolve_pointer(tmp_path, raw, root_relative=True)
+
+        assert resolution.status == "ok"
+        assert resolution.path == target.resolve()
+        assert resolution.path.is_relative_to(tmp_path.resolve())
+
+    def test_without_opt_in_leading_separator_is_rejected_even_if_target_exists(self, tmp_path: Path):
+        (tmp_path / "SETUP.EXE").write_bytes(b"MZ")
+        resolution = resolve_pointer(tmp_path, "\\SETUP.EXE")
+        assert resolution.status == "rejected"
+        assert resolution.reason == "absolute path"
+
+    @pytest.mark.parametrize("raw, marker, reason", [
+        pytest.param("\\\\example.invalid\\share", "example.invalid", "UNC path", id="unc"),
+        pytest.param("//example.invalid", "example.invalid", "UNC path", id="unc_fwd"),
+        pytest.param("\\\\\\formatscout-test-nonexistent", "formatscout-test-nonexistent", "UNC path", id="triple_sep"),
+        pytest.param("\\..\\formatscout-test-nonexistent", "formatscout-test-nonexistent", "parent traversal", id="parent"),
+        pytest.param("\\C:\\formatscout-test-nonexistent", "formatscout-test-nonexistent", "drive letter", id="drive"),
+        pytest.param("\\CON", "CON", "device name", id="device"),
+    ])
+    def test_resolve_pointer_rejects_without_touching_filesystem(
+        self, tmp_path: Path, monkeypatch, raw: str, marker: str, reason: str,
+    ):
+        hits = _install_fs_spy(monkeypatch, [marker])
+        resolution = resolve_pointer(tmp_path, raw, root_relative=True)
+        assert hits == []
+        assert resolution.status == "rejected"
+        assert resolution.path is None
+        assert resolution.reason == reason
+
+    @pytest.mark.parametrize("directive", [
+        "OPEN=\\SETUP.EXE",
+        "OPEN=/SETUP.EXE",
+        'OPEN="\\SETUP.EXE"',
+        "RUN=\\SETUP.EXE",
+    ])
+    def test_root_exe_detected_through_directory_detect(self, tmp_path: Path, directive: str):
+        (tmp_path / "SETUP.EXE").write_bytes(fx.build_pe_header(major_os_version=5, subsystem=3))
+        (tmp_path / "AUTORUN.INF").write_text(f"[autorun]\n{directive}\n", encoding="utf-8")
+        from formatscout.directory_detect import detect_directory
+
+        result = detect_directory(tmp_path)
+
+        assert result.era == "winxp"
+        assert result.warnings == []
+
+    def test_root_subdirectory_exe_detected_through_directory_detect(self, tmp_path: Path):
+        exe = tmp_path / "sub" / "SETUP.EXE"
+        exe.parent.mkdir()
+        exe.write_bytes(fx.build_pe_header(major_os_version=4, subsystem=2))
+        (tmp_path / "AUTORUN.INF").write_text("[autorun]\nOPEN=\\sub\\SETUP.EXE\n", encoding="utf-8")
+        from formatscout.directory_detect import detect_directory
+
+        result = detect_directory(tmp_path)
+
+        assert result.era == "win98"
+        assert result.warnings == []
+
+    def test_missing_root_relative_target_is_silent(self, tmp_path: Path):
+        (tmp_path / "AUTORUN.INF").write_text("[autorun]\nOPEN=\\ABSENT.EXE\n", encoding="utf-8")
+        from formatscout.directory_detect import detect_directory
+
+        result = detect_directory(tmp_path)
+
+        assert not any(w.startswith("pointer rejected: ") for w in result.warnings)
+
+    def test_root_relative_symlink_escape_is_rejected(self, tmp_path: Path, monkeypatch):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "EVIL.EXE"
+        secret.write_bytes(fx.build_pe_header(major_os_version=5, subsystem=3))
+        disc = tmp_path / "disc"
+        disc.mkdir()
+        _symlink_or_skip(disc / "SETUP.EXE", secret)
+        (disc / "AUTORUN.INF").write_text("[autorun]\nOPEN=\\SETUP.EXE\n", encoding="utf-8")
+        opened = _record_opens(monkeypatch)
+        from formatscout.directory_detect import detect_directory
+
+        result = detect_directory(disc)
+
+        assert result.era is None
+        _assert_one_rejection(result.warnings, "escapes base directory")
+        assert not any("EVIL.EXE" in p for p in opened)
+
+    @pytest.mark.parametrize("raw", ["\\track.bin", "/track.bin"])
+    def test_cue_file_with_leading_separator_still_rejected(self, tmp_path: Path, monkeypatch, raw: str):
+        # The target exists at the base, so only the lexical check can stop it.
+        (tmp_path / "track.bin").write_bytes(fx.DREAMCAST_IP_BIN_BLOB)
+        cue_path = _write_cue(tmp_path, raw)
+        opened = _record_opens(monkeypatch)
+        warnings: list[str] = []
+
+        assert _cue_bin_path(cue_path, warnings) is None
+        _assert_one_rejection(warnings, "absolute path")
+        assert not any(p.endswith("track.bin") for p in opened)
