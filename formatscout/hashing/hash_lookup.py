@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 import urllib.error
@@ -55,9 +56,31 @@ _wall_time = time.time
 # across processes.
 _last_fetch_failure: float | None = None
 
-# (path, size, mtime_ns) of default-cache files already checked against
-# _INDEX_SHA256 in this process, so the ~88MB hash runs once per file version.
-_verified_default: set[tuple[Path, int, int]] = set()
+# Monotonic timestamp of the last index-failure warning emitted by this
+# process (see _report_index_failure()); None until one is logged or after a
+# successful download. Later failures inside the backoff window log at debug.
+_failure_logged_at: float | None = None
+
+# (path, size, mtime_ns) -> "managed" for default-cache files already examined
+# in this process, so the sidecar is read (and at most the ~88MB file hashed)
+# once per file version, not once per call. managed=True means the file
+# carries a valid provenance sidecar (we downloaded it, so it may be
+# quarantined if bad); False means user-supplied (never quarantined).
+_verified_default: dict[tuple[Path, int, int], bool] = {}
+
+# Provenance sidecar written next to the cache by a successful download:
+# "<cache name>.meta", JSON {version, sha256, size, mtime_ns, url}. Its
+# presence is what marks the cache as one *we* downloaded and pinned. A cache
+# file with no (valid) sidecar is treated as user-supplied, e.g. one built with
+# build_index.py and dropped at the cache path, and is never pin-checked,
+# hashed or quarantined for failing the pin.
+_SIDECAR_SUFFIX = ".meta"
+_SIDECAR_VERSION = 1
+_MAX_SIDECAR_BYTES = 4096
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+# Quarantine names tried in order: .corrupt, .corrupt.1 ... .corrupt.5.
+_QUARANTINE_SLOTS = 6
 
 # Cached per index_path: (mtime, sha1_index, md5_index, crc32_index). Keyed by mtime
 # so a rebuilt hash_index.json (via build_index.py) is picked up without a restart.
@@ -138,9 +161,76 @@ def _remove_stale_temp_files() -> None:
         pass
 
 
+def _sidecar_path(path: Path) -> Path:
+    return path.with_name(path.name + _SIDECAR_SUFFIX)
+
+
+def _write_sidecar(path: Path, sha256: str, size: int, mtime_ns: int) -> None:
+    """Atomically write the provenance sidecar for the cache file at *path*
+    (temp file in the same directory, then os.replace). Raises OSError."""
+    payload = json.dumps({
+        "version": _SIDECAR_VERSION,
+        "sha256": sha256,
+        "size": size,
+        "mtime_ns": mtime_ns,
+        "url": _INDEX_DOWNLOAD_URL,
+    }).encode("utf-8")
+    sidecar = _sidecar_path(path)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=sidecar.parent, prefix=f".{sidecar.name}.", suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, sidecar)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+
+def _read_sidecar(path: Path) -> tuple[str, int, int] | None:
+    """(sha256, size, mtime_ns) from the sidecar next to *path*, or None when
+    there is no usable one.
+
+    Absent, unreadable, oversized, non-JSON or wrongly-shaped sidecars all
+    return None, i.e. the cache is then treated as user-supplied. A corrupt
+    sidecar means provenance cannot be proven either way; we choose not to
+    quarantine a file on that evidence alone (it may be someone's own index)
+    and log it once per file version. The bad sidecar is left in place (no
+    writes on the read path); the next download overwrites it.
+    """
+    sidecar = _sidecar_path(path)
+    try:
+        with sidecar.open("rb") as fh:
+            raw = fh.read(_MAX_SIDECAR_BYTES + 1)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        log.warning("ignoring unreadable hash index sidecar %s (%s)", sidecar, type(exc).__name__)
+        return None
+    try:
+        if len(raw) > _MAX_SIDECAR_BYTES:
+            raise ValueError("too large")
+        meta = json.loads(raw.decode("utf-8"))
+        sha256, size, mtime_ns = meta["sha256"], meta["size"], meta["mtime_ns"]
+        if not (
+            isinstance(sha256, str) and _SHA256_RE.fullmatch(sha256)
+            and type(size) is int and size >= 0
+            and type(mtime_ns) is int and mtime_ns >= 0
+        ):
+            raise ValueError("bad field")
+    except (ValueError, TypeError, KeyError, RecursionError):
+        log.warning("ignoring malformed hash index sidecar %s; treating the cache as user-supplied", sidecar)
+        return None
+    return sha256, size, mtime_ns
+
+
 def _download_default_index() -> None:
     """Stream the index to a temp file in the cache dir, verify, and atomically
-    install it. No backoff/offline logic here, see _fetch_default_index().
+    install it together with its provenance sidecar (see _write_sidecar()).
+    No backoff/offline logic here, see _fetch_default_index().
 
     Streams in chunks with an incremental sha256 (never holds the whole body
     in memory), enforces _MAX_DOWNLOAD_BYTES and an overall monotonic
@@ -200,7 +290,19 @@ def _download_default_index() -> None:
                 f"hash_index.json download failed sha256 verification: "
                 f"expected {_INDEX_SHA256}, got {actual}"
             )
-        os.replace(tmp_path, _DEFAULT_INDEX_PATH)
+        # Provenance sidecar first, then the index. A crash in between leaves
+        # a sidecar that does not match the (absent or older) index, which
+        # fails closed: the next load quarantines or refetches. The reverse
+        # order would leave a verified index that looks user-supplied. The
+        # mtime_ns is read from the temp file; rename keeps it, so it is what
+        # stat() reports for the installed file.
+        stat = os.stat(tmp_path)
+        _write_sidecar(_DEFAULT_INDEX_PATH, actual, stat.st_size, stat.st_mtime_ns)
+        try:
+            os.replace(tmp_path, _DEFAULT_INDEX_PATH)
+        except BaseException:
+            _sidecar_path(_DEFAULT_INDEX_PATH).unlink(missing_ok=True)
+            raise
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
@@ -251,9 +353,27 @@ def _record_fetch_failure() -> None:
         pass
 
 
+def _report_index_failure(message: str) -> None:
+    """Log an index failure once per backoff window per process.
+
+    The first failure in a window is one warning line (no traceback); every
+    later one in the same window, such as each file of a large scan hitting
+    the same offline/backoff error, is logged at debug. A success or the
+    window elapsing re-arms the warning.
+    """
+    global _failure_logged_at
+    now = _monotonic()
+    if _failure_logged_at is None or not 0 <= now - _failure_logged_at < _FETCH_BACKOFF_SECONDS:
+        _failure_logged_at = now
+        log.warning("%s", message)
+    else:
+        log.debug("%s", message)
+
+
 def _record_fetch_success() -> None:
-    global _last_fetch_failure
+    global _last_fetch_failure, _failure_logged_at
     _last_fetch_failure = None
+    _failure_logged_at = None
     try:
         _failure_marker_path().unlink(missing_ok=True)
     except OSError:
@@ -275,7 +395,7 @@ def _fetch_default_index() -> None:
     except Exception as exc:
         _record_fetch_failure()
         reason = " ".join(f"{type(exc).__name__}: {exc}".split())
-        log.warning("hash index download failed: %s", reason)
+        _report_index_failure(f"hash index download failed: {reason}")
         raise _IndexUnavailableError(f"download failed ({reason[:160]})") from exc
     _record_fetch_success()
 
@@ -384,32 +504,94 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _quarantine(path: Path) -> None:
-    """Move a bad default-cache file aside as <name>.corrupt (replacing any
-    earlier quarantined copy) and forget everything cached about it.
+def _mark_verified(path: Path) -> None:
+    """Record the freshly downloaded file at *path* as managed for this process."""
+    stat = path.stat()
+    _verified_default[(path, stat.st_size, stat.st_mtime_ns)] = True
 
+
+def _move_no_overwrite(src: Path, dst: Path) -> None:
+    """Move *src* to *dst*, raising FileExistsError instead of replacing.
+
+    os.link() refuses to overwrite on every platform, so link-then-unlink is
+    an atomic no-overwrite move. Where hard links are unavailable (some
+    filesystems) it falls back to exists() + os.rename(); that has a small
+    window in which another process could take the same name (POSIX rename
+    would then replace it, Windows refuses). The most that race can lose is
+    an already-quarantined copy, never the live index.
+    """
+    try:
+        os.link(src, dst)
+    except (FileExistsError, FileNotFoundError):
+        raise
+    except OSError:
+        if dst.exists():
+            raise FileExistsError(str(dst)) from None
+        os.rename(src, dst)
+        return
+    try:
+        os.unlink(src)
+    except FileNotFoundError:
+        pass  # another process already moved it; our link is one more copy
+    except OSError:
+        # src could not be removed (e.g. a Windows sharing violation while
+        # another process has it open): drop our link again so a failed
+        # attempt does not use up a quarantine slot, then report the failure.
+        try:
+            os.unlink(dst)
+        except OSError:
+            pass
+        raise
+
+
+def _quarantine(path: Path) -> None:
+    """Move a bad default-cache file aside, never overwriting an earlier
+    quarantined copy, and forget everything cached about it.
+
+    The destination is the first free of <name>.corrupt, .corrupt.1 ...
+    .corrupt.5; if all are taken this raises _IndexUnavailableError asking
+    the user to clean up (the file stays where it is). At most six copies are
+    kept, which bounds the disk this can consume.
+
+    The stale provenance sidecar is removed only after the data file has
+    moved, so a failure part-way never leaves a file that looks user-supplied.
     A file that is already gone (another process quarantined it first) counts
-    as done. Any other OS error (e.g. a Windows sharing violation) raises
-    _IndexUnavailableError. That is deliberately not recorded as a download
-    failure: no download was attempted, so it must not start the backoff.
+    as done, and then the sidecar is left alone because it may belong to that
+    process's refetch. Any other OS error (e.g. a Windows sharing violation)
+    raises _IndexUnavailableError. That is deliberately not recorded as a
+    download failure: no download was attempted, so it must not start the
+    backoff.
     """
     _index_cache.pop(path, None)
-    _verified_default.difference_update([k for k in list(_verified_default) if k[0] == path])
-    try:
-        os.replace(path, path.with_name(path.name + ".corrupt"))
-        log.warning("quarantined unusable hash index cache: %s", path)
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
+    for key in [k for k in _verified_default if k[0] == path]:
+        del _verified_default[key]
+
+    for slot in range(_QUARANTINE_SLOTS):
+        target = path.with_name(path.name + (".corrupt" if slot == 0 else f".corrupt.{slot}"))
+        try:
+            _move_no_overwrite(path, target)
+        except FileExistsError:
+            continue
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise _IndexUnavailableError(
+                f"cannot quarantine unusable index cache ({type(exc).__name__})"
+            ) from exc
+        log.warning("quarantined unusable hash index cache: %s -> %s", path, target.name)
+        break
+    else:
         raise _IndexUnavailableError(
-            f"cannot quarantine unusable index cache ({type(exc).__name__})"
-        ) from exc
+            f"cannot quarantine unusable index cache: {path.name}.corrupt through "
+            f"{path.name}.corrupt.{_QUARANTINE_SLOTS - 1} already exist in {path.parent}; "
+            "please delete the old quarantined copies"
+        )
 
-
-def _mark_verified(path: Path) -> None:
-    """Record the file at *path* as pin-verified for this process."""
-    stat = path.stat()
-    _verified_default.add((path, stat.st_size, stat.st_mtime_ns))
+    try:
+        _sidecar_path(path).unlink(missing_ok=True)
+    except OSError:
+        # A refetch overwrites the sidecar; a stale one next to no index is inert.
+        log.debug("could not remove stale hash index sidecar for %s", path)
 
 
 def _default_cache_matches_pin(path: Path, size: int) -> bool:
@@ -421,6 +603,36 @@ def _default_cache_matches_pin(path: Path, size: int) -> bool:
         return _sha256_file(path) == _INDEX_SHA256
     except OSError:
         return False
+
+
+def _cache_provenance_ok(path: Path, stat: os.stat_result, recorded: tuple[str, int, int]) -> bool:
+    """Does the file at *path* still match what its sidecar recorded?
+
+    "Matches" means:
+      1. the sidecar's sha256 equals the current pin (a different pin means
+         the file is from another release and must be replaced); and
+      2. the file's (size, mtime_ns) equal the recorded identity. This is the
+         cheap path taken on every process start: no hashing; or
+      3. only mtime_ns differs (a copy or backup restore), size equals the
+         recorded size, and the file hashes to the pin: accepted, and the
+         sidecar is refreshed.
+    Any other difference (different size, or same size but wrong hash) is a
+    modified or foreign file: no match. Content at rest is not re-hashed when
+    the identity matches; the download was pin-verified and the JSON parse
+    still guards against a truncated or garbled file.
+    """
+    sha256, size, mtime_ns = recorded
+    if sha256 != _INDEX_SHA256:
+        return False
+    if stat.st_size == size and stat.st_mtime_ns == mtime_ns:
+        return True
+    if stat.st_size != size or not _default_cache_matches_pin(path, stat.st_size):
+        return False
+    try:
+        _write_sidecar(path, sha256, stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        pass  # still accepted for this process; just re-hashed next time
+    return True
 
 
 def _parse_index(index_path: Path) -> tuple[dict, dict, dict]:
@@ -465,34 +677,54 @@ def _parse_index(index_path: Path) -> tuple[dict, dict, dict]:
 
 
 def _load_default_index(path: Path) -> tuple[dict, dict, dict]:
-    """Load the downloaded default cache, verifying it against the pin.
+    """Load the default cache, checking provenance only if we downloaded it.
 
-    The sha256 check runs once per process per (path, size, mtime_ns). A
-    mismatch or unparseable JSON quarantines the file and refetches under the
-    normal backoff rules; a freshly downloaded file is already pin-verified by
-    the download itself and is not hashed again.
+    A file with a valid sidecar (written by our download) is "managed": once
+    per process per (path, size, mtime_ns) it is compared with the sidecar
+    and the pin (see _cache_provenance_ok); a mismatch quarantines it and
+    refetches under the normal backoff rules. A file with no usable sidecar is
+    user-supplied (for example one built with build_index.py): it gets only
+    the size cap and JSON validity checks, is never hashed for the pin, and is
+    never quarantined; if it is unusable the error says to delete it.
+
+    A freshly downloaded file is pin-verified by the download itself. A
+    managed file that fails to parse is quarantined and refetched.
     """
     fresh = False
     if not path.exists():
         _fetch_default_index()
         fresh = True
-
     stat = path.stat()
     key = (path, stat.st_size, stat.st_mtime_ns)
+
     if fresh:
-        _verified_default.add(key)
-    elif key not in _verified_default:
-        if _default_cache_matches_pin(path, stat.st_size):
-            _verified_default.add(key)
+        managed = True
+        _verified_default[key] = True
+    elif key in _verified_default:
+        managed = _verified_default[key]
+    else:
+        recorded = _read_sidecar(path)
+        if recorded is None:
+            managed = False
+            _verified_default[key] = False
+        elif _cache_provenance_ok(path, stat, recorded):
+            managed = True
+            _verified_default[key] = True
         else:
             _quarantine(path)
             _fetch_default_index()
-            fresh = True
+            fresh = managed = True
             _mark_verified(path)
 
     try:
         return _parse_index(path)
-    except _IndexCorruptError:
+    except _IndexCorruptError as exc:
+        if not managed:
+            raise _IndexCorruptError(
+                f"{exc}; {path} has no download record so it is treated as "
+                "user-supplied and was left in place: fix it, or delete it to "
+                "download the pinned index"
+            ) from exc
         _quarantine(path)
         if fresh:
             # A pin-verified download that does not parse would just repeat on
@@ -526,9 +758,10 @@ def load_index(index_path: Path) -> tuple[dict, dict, dict]:
     backoff window, network or integrity failure) or any index file is too
     large or corrupt.
 
-    Only the default downloaded cache is checked against the pinned sha256. A
-    custom path (e.g. a user-built index) is trusted as-is, subject to the
-    size cap and JSON validity.
+    Only a default cache that carries our download's provenance sidecar is
+    checked against the pin. A custom path, or a default-path file with no
+    sidecar (e.g. a user-built index), is trusted as-is, subject to the size
+    cap and JSON validity.
     """
     if index_path == _DEFAULT_INDEX_PATH:
         try:

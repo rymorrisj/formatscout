@@ -109,8 +109,11 @@ def _detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> Scan
             # the result so callers can tell "no hash match" from "hash tier
             # did not run". The warning is attached once, after the heuristic
             # tiers have produced their result.
-            log.warning("Hash index unavailable for '%s': %s", path, exc, exc_info=True)
             index_warning = _index_unavailable_warning(exc)
+            # One warning line per backoff window per process (no traceback);
+            # the rest of a scan logs this at debug. The per-result warning
+            # above is separate and unchanged.
+            _hash_lookup._report_index_failure(f"{index_warning} (while scanning {str(path)!r})")
         except Exception as exc:
             # Quiet by design: FileNotFoundError for an index path that does
             # not exist (only reachable with a custom or patched index path,

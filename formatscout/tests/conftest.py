@@ -15,6 +15,8 @@ Why each patch exists:
   it; tests of the download patch hash_lookup._open_index_url instead.
 * hash_lookup._CACHE_DIR/_DEFAULT_INDEX_PATH/_fetch_default_index -> a
   nonexistent tmp path and a raising stub, so no code path can download.
+* hash_lookup's process-level backoff / verified-file / log-once state is
+  reset for each test.
 * detector/classify/verify._INDEX_PATH are bound to the real home at import
   time (collection happens before any fixture runs), so they are re-pointed
   here via the shared fx.patch_* helpers. They get a nonexistent path that
@@ -77,6 +79,12 @@ def _hermetic_environment(monkeypatch, tmp_path_factory, network_guard):
     monkeypatch.setattr(
         hash_lookup, "_fetch_default_index", _blocker("hash_lookup._fetch_default_index", network_guard),
     )
+
+    # Process-level index state (backoff, per-version checks, log-once window)
+    # starts empty in every test; monkeypatch restores the originals.
+    monkeypatch.setattr(hash_lookup, "_last_fetch_failure", None)
+    monkeypatch.setattr(hash_lookup, "_failure_logged_at", None)
+    monkeypatch.setattr(hash_lookup, "_verified_default", {})
 
     no_index: Path = cache_dir / "no_index.json"
     fx.patch_detector_index(monkeypatch, no_index)

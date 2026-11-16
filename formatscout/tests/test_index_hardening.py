@@ -13,9 +13,11 @@ fixture) and put back by the `env` fixture, so the backoff/offline/download
 logic is exercised for real against a tmp cache dir.
 """
 
+import errno
 import io
 import itertools
 import json
+import logging
 import os
 import urllib.error
 import urllib.request
@@ -106,6 +108,10 @@ class _Env:
     marker: Path
     sha_calls: list[Path] = field(default_factory=list)
 
+    @property
+    def sidecar(self) -> Path:
+        return self.index_path.with_name(self.index_path.name + ".meta")
+
     def names(self) -> list[str]:
         return sorted(p.name for p in self.cache_dir.iterdir()) if self.cache_dir.exists() else []
 
@@ -122,7 +128,8 @@ def env(monkeypatch: pytest.MonkeyPatch) -> _Env:
     monkeypatch.setattr(hash_lookup, "_open_index_url", opener)
     monkeypatch.setattr(hash_lookup, "_INDEX_SHA256", _sha256(_PAYLOAD))
     monkeypatch.setattr(hash_lookup, "_last_fetch_failure", None)
-    monkeypatch.setattr(hash_lookup, "_verified_default", set())
+    monkeypatch.setattr(hash_lookup, "_verified_default", {})
+    monkeypatch.setattr(hash_lookup, "_failure_logged_at", None)
     monkeypatch.delenv(hash_lookup._OFFLINE_ENV, raising=False)
 
     real_sha = hash_lookup._sha256_file
@@ -139,6 +146,17 @@ def env(monkeypatch: pytest.MonkeyPatch) -> _Env:
 
     monkeypatch.setattr(hash_lookup, "_sha256_file", _counting_sha)
     return result
+
+
+def _install_managed(env: _Env, data: bytes = _PAYLOAD) -> None:
+    """Put *data* at the default cache path with a sidecar that matches it, as
+    a successful download would have left it (sidecar sha256 = current pin)."""
+    env.cache_dir.mkdir(parents=True, exist_ok=True)
+    env.index_path.write_bytes(data)
+    st = env.index_path.stat()
+    hash_lookup._write_sidecar(
+        env.index_path, hash_lookup._INDEX_SHA256, st.st_size, st.st_mtime_ns,
+    )
 
 
 def _detect(path: Path):
@@ -163,7 +181,8 @@ class TestDownload:
         assert env.opener.calls == 1
         assert env.opener.urls[0].startswith("https://")
         assert env.opener.timeouts == [hash_lookup._SOCKET_TIMEOUT_SECONDS]
-        assert env.names() == ["hash_index.json"]  # no temp file, no failure marker
+        # No temp file, no failure marker; the provenance sidecar sits beside it.
+        assert env.names() == ["hash_index.json", "hash_index.json.meta"]
 
     def test_streams_in_multiple_chunks(self, env: _Env, monkeypatch):
         monkeypatch.setattr(hash_lookup, "_DOWNLOAD_CHUNK", 16)
@@ -379,8 +398,7 @@ class TestOffline:
         assert env.opener.calls == 1
 
     def test_offline_still_loads_an_existing_verified_cache(self, env: _Env, monkeypatch):
-        env.cache_dir.mkdir(parents=True)
-        env.index_path.write_bytes(_PAYLOAD)
+        _install_managed(env)
         monkeypatch.setenv(hash_lookup._OFFLINE_ENV, "1")
 
         index, _md5, _crc = hash_lookup.load_index(env.index_path)
@@ -394,8 +412,8 @@ class TestOffline:
 # ---------------------------------------------------------------------------
 
 class TestLoadVerification:
-    def test_corrupt_cache_is_quarantined_and_refetched(self, env: _Env):
-        env.cache_dir.mkdir(parents=True)
+    def test_tampered_downloaded_cache_is_quarantined_and_refetched(self, env: _Env):
+        _install_managed(env)
         env.index_path.write_bytes(b"{ not the pinned bytes")
         quarantine = env.index_path.with_name("hash_index.json.corrupt")
         quarantine.write_bytes(b"older quarantined copy")
@@ -405,10 +423,12 @@ class TestLoadVerification:
         assert index == fx.build_synthetic_index()
         assert env.opener.calls == 1
         assert env.index_path.read_bytes() == _PAYLOAD
-        assert quarantine.read_bytes() == b"{ not the pinned bytes"  # previous copy overwritten
+        assert quarantine.read_bytes() == b"older quarantined copy"  # never overwritten
+        numbered = env.index_path.with_name("hash_index.json.corrupt.1")
+        assert numbered.read_bytes() == b"{ not the pinned bytes"
 
     def test_quarantine_refetch_follows_backoff_when_download_fails(self, env: _Env):
-        env.cache_dir.mkdir(parents=True)
+        _install_managed(env)
         env.index_path.write_bytes(b"bad")
         env.opener.fail(urllib.error.URLError("boom"))
 
@@ -422,8 +442,7 @@ class TestLoadVerification:
         assert env.index_path.with_name("hash_index.json.corrupt").read_bytes() == b"bad"
 
     def test_refetch_after_parse_failure_is_marked_verified(self, env: _Env, monkeypatch):
-        env.cache_dir.mkdir(parents=True)
-        env.index_path.write_bytes(_PAYLOAD)
+        _install_managed(env)
         real_parse = hash_lookup._parse_index
         parse_calls: list[Path] = []
 
@@ -437,23 +456,22 @@ class TestLoadVerification:
 
         hash_lookup.load_index(env.index_path)
         assert env.opener.calls == 1
-        assert env.sha_calls == [env.index_path]  # initial check only
+        assert env.sha_calls == []  # identity fast path, nothing hashed
 
         hash_lookup._index_cache.clear()
         hash_lookup.load_index(env.index_path)
-        assert env.sha_calls == [env.index_path]  # refetched file not re-hashed
+        assert env.opener.calls == 1
+        assert env.sha_calls == []  # refetched file not re-hashed
 
     def test_quarantine_failure_does_not_start_backoff(self, env: _Env, monkeypatch):
-        env.cache_dir.mkdir(parents=True)
+        _install_managed(env)
         env.index_path.write_bytes(b"bad")
-        real_replace = os.replace
 
         def _locked(src, dst):
-            if str(dst).endswith(".corrupt"):
-                raise PermissionError("file in use")
-            return real_replace(src, dst)
+            raise PermissionError("file in use")
 
-        monkeypatch.setattr(hash_lookup.os, "replace", _locked)
+        monkeypatch.setattr(hash_lookup.os, "link", _locked)
+        monkeypatch.setattr(hash_lookup.os, "rename", _locked)
 
         with pytest.raises(_IndexUnavailableError, match="quarantine"):
             hash_lookup.load_index(env.index_path)
@@ -461,6 +479,8 @@ class TestLoadVerification:
         assert env.opener.calls == 0
         assert not env.marker.exists()
         assert hash_lookup._last_fetch_failure is None
+        assert env.index_path.read_bytes() == b"bad"
+        assert env.sidecar.exists()  # file did not move, so its sidecar stays
 
     def test_default_cache_vanishing_mid_load_is_index_unavailable(self, env: _Env, monkeypatch):
         env.cache_dir.mkdir(parents=True)
@@ -480,8 +500,7 @@ class TestLoadVerification:
     def test_pin_valid_but_unparseable_does_not_redownload_in_a_loop(self, env: _Env, monkeypatch):
         not_json = b"definitely not json"
         monkeypatch.setattr(hash_lookup, "_INDEX_SHA256", _sha256(not_json))
-        env.cache_dir.mkdir(parents=True)
-        env.index_path.write_bytes(not_json)
+        _install_managed(env, not_json)
         env.opener.serve(not_json)
 
         with pytest.raises(_IndexCorruptError):
@@ -491,36 +510,305 @@ class TestLoadVerification:
 
         assert env.opener.calls == 1  # one refetch, then backoff
 
-    def test_pin_is_checked_once_per_process_per_file_version(self, env: _Env):
-        env.cache_dir.mkdir(parents=True)
-        env.index_path.write_bytes(_PAYLOAD)
+    def test_matching_identity_is_never_hashed(self, env: _Env):
+        _install_managed(env)
 
         hash_lookup.load_index(env.index_path)
         hash_lookup._index_cache.clear()
+        hash_lookup._verified_default.clear()  # simulate a new process
         hash_lookup.load_index(env.index_path)
-        assert env.sha_calls == [env.index_path]
 
+        assert env.sha_calls == []
+        assert env.opener.calls == 0
+
+    def test_mtime_drift_with_pinned_content_is_hashed_once_and_accepted(self, env: _Env):
+        _install_managed(env)
         new_mtime = env.index_path.stat().st_mtime + 5
         os.utime(env.index_path, (new_mtime, new_mtime))
+
         hash_lookup.load_index(env.index_path)
-        assert env.sha_calls == [env.index_path, env.index_path]
+        hash_lookup._index_cache.clear()
+        hash_lookup.load_index(env.index_path)  # same process, same version: cached
+        assert env.sha_calls == [env.index_path]
+        assert env.opener.calls == 0
+        assert not env.index_path.with_name("hash_index.json.corrupt").exists()
+
+        # The sidecar was refreshed, so a new process takes the fast path.
+        hash_lookup._verified_default.clear()
+        hash_lookup._index_cache.clear()
+        hash_lookup.load_index(env.index_path)
+        assert env.sha_calls == [env.index_path]
 
     def test_freshly_downloaded_file_is_not_hashed_again(self, env: _Env):
         hash_lookup.load_index(env.index_path)
 
         assert env.sha_calls == []
 
-    def test_oversized_default_cache_is_rejected_without_hashing(self, env: _Env, monkeypatch):
+    def test_oversized_downloaded_cache_is_quarantined_without_hashing(self, env: _Env, monkeypatch):
+        _install_managed(env)
         monkeypatch.setattr(hash_lookup, "_MAX_INDEX_BYTES", len(_PAYLOAD) - 1)
         monkeypatch.setattr(hash_lookup, "_MAX_DOWNLOAD_BYTES", len(_PAYLOAD) - 1)
-        env.cache_dir.mkdir(parents=True)
-        env.index_path.write_bytes(_PAYLOAD)
 
         with pytest.raises(_IndexUnavailableError):
             hash_lookup.load_index(env.index_path)
 
         assert env.sha_calls == []
         assert env.index_path.with_name("hash_index.json.corrupt").exists()
+
+    def test_oversized_user_supplied_cache_is_refused_and_left_in_place(self, env: _Env, monkeypatch):
+        monkeypatch.setattr(hash_lookup, "_MAX_INDEX_BYTES", len(_PAYLOAD) - 1)
+        env.cache_dir.mkdir(parents=True)
+        env.index_path.write_bytes(_PAYLOAD)
+
+        with pytest.raises(_IndexCorruptError, match="byte limit"):
+            hash_lookup.load_index(env.index_path)
+
+        assert env.sha_calls == []
+        assert env.opener.calls == 0
+        assert env.index_path.read_bytes() == _PAYLOAD
+        assert not env.index_path.with_name("hash_index.json.corrupt").exists()
+
+
+class TestProvenanceSidecar:
+    def test_download_writes_sidecar_with_identity_and_source(self, env: _Env):
+        hash_lookup.load_index(env.index_path)
+
+        meta = json.loads(env.sidecar.read_text(encoding="utf-8"))
+        stat = env.index_path.stat()
+        assert meta["sha256"] == _sha256(_PAYLOAD) == hash_lookup._INDEX_SHA256
+        assert meta["size"] == len(_PAYLOAD) == stat.st_size
+        assert meta["mtime_ns"] == stat.st_mtime_ns
+        assert meta["url"] == hash_lookup._INDEX_DOWNLOAD_URL
+        assert env.temp_files() == []
+
+    def test_failed_download_writes_no_sidecar(self, env: _Env):
+        env.opener.serve(_PAYLOAD + b" tampered")
+
+        with pytest.raises(_IndexUnavailableError):
+            hash_lookup._fetch_default_index()
+
+        assert not env.sidecar.exists()
+        assert env.temp_files() == []
+
+    def test_failed_install_removes_the_new_sidecar(self, env: _Env, monkeypatch):
+        real_replace = os.replace
+
+        def _no_install(src, dst):
+            if Path(dst) == env.index_path:
+                raise PermissionError("in use")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(hash_lookup.os, "replace", _no_install)
+
+        with pytest.raises(_IndexUnavailableError):
+            hash_lookup._fetch_default_index()
+
+        assert not env.sidecar.exists()
+        assert env.temp_files() == []
+
+    def test_matching_file_passes_without_network_or_hashing(self, env: _Env):
+        hash_lookup.load_index(env.index_path)  # download, writes the sidecar
+        hash_lookup._verified_default.clear()  # simulate a new process
+        hash_lookup._index_cache.clear()
+
+        index, _md5, _crc = hash_lookup.load_index(env.index_path)
+
+        assert index == fx.build_synthetic_index()
+        assert env.opener.calls == 1
+        assert env.sha_calls == []
+
+    def test_modified_file_with_sidecar_is_quarantined_and_refetched(self, env: _Env):
+        _install_managed(env)
+        env.index_path.write_text(json.dumps({"x": {"title": "Mine", "era": "ps1"}}), encoding="utf-8")
+
+        index, _md5, _crc = hash_lookup.load_index(env.index_path)
+
+        assert index == fx.build_synthetic_index()
+        assert env.opener.calls == 1
+        assert env.index_path.with_name("hash_index.json.corrupt").exists()
+        assert env.sha_calls == []  # size differs: no need to hash
+        meta = json.loads(env.sidecar.read_text(encoding="utf-8"))
+        assert meta["mtime_ns"] == env.index_path.stat().st_mtime_ns  # fresh sidecar
+
+    def test_same_size_different_content_is_caught_by_hashing(self, env: _Env):
+        _install_managed(env)
+        tampered = bytearray(_PAYLOAD)
+        tampered[-2] ^= 0x01
+        env.index_path.write_bytes(bytes(tampered))
+        new_mtime = env.index_path.stat().st_mtime + 5
+        os.utime(env.index_path, (new_mtime, new_mtime))
+
+        hash_lookup.load_index(env.index_path)
+
+        assert env.sha_calls == [env.index_path]
+        assert env.opener.calls == 1
+        assert env.index_path.with_name("hash_index.json.corrupt").read_bytes() == bytes(tampered)
+
+    def test_sidecar_for_an_older_pin_triggers_refetch(self, env: _Env):
+        _install_managed(env)
+        st = env.index_path.stat()
+        hash_lookup._write_sidecar(env.index_path, "0" * 64, st.st_size, st.st_mtime_ns)
+
+        hash_lookup.load_index(env.index_path)
+
+        assert env.opener.calls == 1
+        assert env.index_path.with_name("hash_index.json.corrupt").exists()
+
+    def test_quarantine_removes_the_stale_sidecar(self, env: _Env):
+        _install_managed(env)
+        env.index_path.write_bytes(b"bad")
+        env.opener.fail(urllib.error.URLError("boom"))
+
+        with pytest.raises(_IndexUnavailableError):
+            hash_lookup.load_index(env.index_path)
+
+        assert not env.index_path.exists()
+        assert not env.sidecar.exists()
+
+    def test_no_sidecar_means_user_supplied_and_is_never_quarantined(self, env: _Env):
+        custom = json.dumps({"abc": {"title": "Mine", "era": "ps1"}}).encode("utf-8")
+        assert _sha256(custom) != hash_lookup._INDEX_SHA256
+        env.cache_dir.mkdir(parents=True)
+        env.index_path.write_bytes(custom)
+
+        index, _md5, _crc = hash_lookup.load_index(env.index_path)
+
+        assert index == {"abc": {"title": "Mine", "era": "ps1"}}
+        assert env.sha_calls == []
+        assert env.opener.calls == 0
+        assert env.index_path.read_bytes() == custom
+        assert env.names() == ["hash_index.json"]  # no .corrupt, no sidecar invented
+
+    def test_user_supplied_index_built_with_build_index_loads_unverified(self, env: _Env):
+        env.cache_dir.mkdir(parents=True)
+        env.index_path.write_bytes(json.dumps(fx.build_synthetic_index()).encode("utf-8") + b"\n")
+
+        index, _md5, _crc = hash_lookup.load_index(env.index_path)
+
+        assert index == fx.build_synthetic_index()
+        assert env.sha_calls == [] and env.opener.calls == 0
+
+    def test_user_supplied_invalid_json_is_reported_and_left_in_place(self, env: _Env):
+        env.cache_dir.mkdir(parents=True)
+        env.index_path.write_bytes(b"{ truncated")
+
+        with pytest.raises(_IndexCorruptError, match="user-supplied"):
+            hash_lookup.load_index(env.index_path)
+
+        assert env.index_path.read_bytes() == b"{ truncated"
+        assert env.opener.calls == 0
+        assert env.names() == ["hash_index.json"]
+        assert hash_lookup._last_fetch_failure is None and not env.marker.exists()
+
+    @pytest.mark.parametrize("sidecar_bytes", [
+        b"not json",
+        b"[]",
+        b'{"sha256": "abc", "size": 1, "mtime_ns": 1}',
+        b'{"sha256": "' + b"0" * 64 + b'", "size": true, "mtime_ns": 1}',
+        b'{"sha256": "' + b"0" * 64 + b'", "size": 1}',
+        b"{" + b" " * 5000 + b"}",
+        b"\xff\xfe",
+    ])
+    def test_malformed_sidecar_is_treated_as_no_sidecar(self, env: _Env, sidecar_bytes: bytes):
+        env.cache_dir.mkdir(parents=True)
+        custom = json.dumps({"abc": {"title": "Mine", "era": "ps1"}}).encode("utf-8")
+        env.index_path.write_bytes(custom)
+        env.sidecar.write_bytes(sidecar_bytes)
+
+        index, _md5, _crc = hash_lookup.load_index(env.index_path)
+
+        assert index == {"abc": {"title": "Mine", "era": "ps1"}}
+        assert env.opener.calls == 0 and env.sha_calls == []
+        assert env.index_path.read_bytes() == custom  # not quarantined
+        assert env.sidecar.read_bytes() == sidecar_bytes  # no writes on the read path
+
+    def test_next_download_overwrites_a_malformed_sidecar(self, env: _Env):
+        env.cache_dir.mkdir(parents=True)
+        env.sidecar.write_bytes(b"garbage")
+
+        hash_lookup.load_index(env.index_path)  # no index: downloads
+
+        assert json.loads(env.sidecar.read_text(encoding="utf-8"))["sha256"] == hash_lookup._INDEX_SHA256
+
+
+class TestQuarantineNaming:
+    _NAMES = ["hash_index.json.corrupt"] + [f"hash_index.json.corrupt.{n}" for n in range(1, 6)]
+
+    def _bad(self, env: _Env, content: bytes) -> None:
+        env.cache_dir.mkdir(parents=True, exist_ok=True)
+        env.index_path.write_bytes(content)
+
+    def test_each_quarantine_takes_the_next_free_name_and_never_overwrites(self, env: _Env):
+        for n, name in enumerate(self._NAMES):
+            self._bad(env, f"bad {n}".encode())
+            hash_lookup._quarantine(env.index_path)
+            assert not env.index_path.exists()
+
+        for n, name in enumerate(self._NAMES):
+            assert (env.cache_dir / name).read_bytes() == f"bad {n}".encode()
+
+    def test_exhausted_names_raise_and_keep_the_file_in_place(self, env: _Env):
+        for n, name in enumerate(self._NAMES):
+            (env.cache_dir / name).parent.mkdir(parents=True, exist_ok=True)
+            (env.cache_dir / name).write_bytes(f"old {n}".encode())
+        self._bad(env, b"live but bad")
+
+        with pytest.raises(_IndexUnavailableError, match="delete the old quarantined"):
+            hash_lookup._quarantine(env.index_path)
+
+        assert env.index_path.read_bytes() == b"live but bad"
+        for n, name in enumerate(self._NAMES):
+            assert (env.cache_dir / name).read_bytes() == f"old {n}".encode()
+        assert hash_lookup._last_fetch_failure is None and not env.marker.exists()
+
+    def test_exhaustion_through_load_index_does_not_download(self, env: _Env):
+        _install_managed(env)
+        for name in self._NAMES:
+            (env.cache_dir / name).write_bytes(b"old")
+        env.index_path.write_bytes(b"bad")
+
+        with pytest.raises(_IndexUnavailableError, match="quarantine"):
+            hash_lookup.load_index(env.index_path)
+
+        assert env.opener.calls == 0
+        assert not env.marker.exists()
+
+    def test_fallback_without_hard_links_still_never_overwrites(self, env: _Env, monkeypatch):
+        def _no_links(src, dst):
+            raise OSError(errno.EPERM, "hard links not supported")
+
+        monkeypatch.setattr(hash_lookup.os, "link", _no_links)
+        for n in range(3):
+            self._bad(env, f"bad {n}".encode())
+            hash_lookup._quarantine(env.index_path)
+
+        for n, name in enumerate(self._NAMES[:3]):
+            assert (env.cache_dir / name).read_bytes() == f"bad {n}".encode()
+
+    def test_lost_race_for_a_name_moves_on_to_the_next(self, env: _Env, monkeypatch):
+        self._bad(env, b"bad")
+        real_link = os.link
+
+        def _racy(src, dst):
+            if str(dst).endswith(".corrupt"):
+                Path(dst).write_bytes(b"won by another process")
+            return real_link(src, dst)
+
+        monkeypatch.setattr(hash_lookup.os, "link", _racy)
+
+        hash_lookup._quarantine(env.index_path)
+
+        assert (env.cache_dir / "hash_index.json.corrupt").read_bytes() == b"won by another process"
+        assert (env.cache_dir / "hash_index.json.corrupt.1").read_bytes() == b"bad"
+
+    def test_already_gone_file_is_done_and_leaves_the_sidecar_alone(self, env: _Env):
+        env.cache_dir.mkdir(parents=True)
+        env.sidecar.write_bytes(b"{}")
+
+        hash_lookup._quarantine(env.index_path)
+
+        assert env.sidecar.exists()
+        assert env.names() == ["hash_index.json.meta"]
 
 
 class TestCustomIndexPath:
@@ -693,6 +981,101 @@ class TestDetectWarning:
 
         assert result.era == "nes"
         assert _index_warnings(result) == []
+
+
+class TestFailureLogging:
+    """An index failure is one warning line per backoff window per process
+    (no traceback); the rest of a scan logs it at debug."""
+
+    _LOGGER = "formatscout"
+
+    def _files(self, tmp_path: Path, count: int = 4) -> list[Path]:
+        paths = []
+        for n in range(count):
+            path = tmp_path / f"game{n}.nes"
+            path.write_bytes(fx.UNINDEXED_CONTENT)
+            paths.append(path)
+        return paths
+
+    @staticmethod
+    def _index_records(caplog, level: int):
+        return [
+            r for r in caplog.records
+            if r.levelno == level and "hash index" in r.getMessage().lower()
+        ]
+
+    def test_offline_scan_warns_once_then_logs_debug(self, env: _Env, tmp_path: Path, monkeypatch, caplog):
+        fx.patch_detector_index(monkeypatch, env.index_path)
+        monkeypatch.setenv(hash_lookup._OFFLINE_ENV, "1")
+        caplog.set_level(logging.DEBUG, logger=self._LOGGER)
+
+        results = [_detect(path) for path in self._files(tmp_path)]
+
+        warnings = self._index_records(caplog, logging.WARNING)
+        assert len(warnings) == 1
+        assert warnings[0].exc_info is None
+        assert len(self._index_records(caplog, logging.DEBUG)) == 3
+        # The per-result warning is unchanged and present on every result.
+        assert all(len(_index_warnings(r)) == 1 for r in results)
+
+    def test_failed_download_and_following_calls_log_a_single_warning(
+        self, env: _Env, tmp_path: Path, monkeypatch, caplog,
+    ):
+        fx.patch_detector_index(monkeypatch, env.index_path)
+        env.opener.fail(urllib.error.URLError("boom"))
+        caplog.set_level(logging.DEBUG, logger=self._LOGGER)
+
+        for path in self._files(tmp_path, 3):
+            _detect(path)
+
+        warnings = self._index_records(caplog, logging.WARNING)
+        assert len(warnings) == 1
+        assert "download failed" in warnings[0].getMessage()
+        assert warnings[0].exc_info is None
+        assert env.opener.calls == 1
+
+    def test_warns_again_after_the_window_elapses(self, env: _Env, tmp_path: Path, monkeypatch, caplog):
+        fx.patch_detector_index(monkeypatch, env.index_path)
+        monkeypatch.setenv(hash_lookup._OFFLINE_ENV, "1")
+        clock = [1000.0]
+        monkeypatch.setattr(hash_lookup, "_monotonic", lambda: clock[0])
+        caplog.set_level(logging.DEBUG, logger=self._LOGGER)
+        paths = self._files(tmp_path, 3)
+
+        _detect(paths[0])
+        clock[0] += hash_lookup._FETCH_BACKOFF_SECONDS - 1
+        _detect(paths[1])
+        assert len(self._index_records(caplog, logging.WARNING)) == 1
+
+        clock[0] += 2
+        _detect(paths[2])
+        assert len(self._index_records(caplog, logging.WARNING)) == 2
+
+    def test_success_rearms_the_warning(self, env: _Env, caplog):
+        caplog.set_level(logging.DEBUG, logger=self._LOGGER)
+        hash_lookup._report_index_failure("hash index first")
+        hash_lookup._report_index_failure("hash index second")
+        hash_lookup._record_fetch_success()
+        hash_lookup._report_index_failure("hash index third")
+
+        levels = [r.levelno for r in caplog.records]
+        assert levels == [logging.WARNING, logging.DEBUG, logging.WARNING]
+
+    def test_message_cannot_inject_control_characters(self, env: _Env, tmp_path: Path, monkeypatch, caplog):
+        fx.patch_detector_index(monkeypatch, env.index_path)
+        monkeypatch.setenv(hash_lookup._OFFLINE_ENV, "1")
+        caplog.set_level(logging.DEBUG, logger=self._LOGGER)
+        evil = tmp_path / "evil\x1b[31m\nname.nes"
+        try:
+            evil.write_bytes(fx.UNINDEXED_CONTENT)
+        except OSError:
+            pytest.skip("filesystem does not allow control characters in names")
+
+        _detect(evil)
+
+        warnings = self._index_records(caplog, logging.WARNING)
+        assert len(warnings) == 1
+        assert all(ch.isprintable() for ch in warnings[0].getMessage())
 
 
 class TestClassifyVerifyContract:
