@@ -28,7 +28,8 @@ classifiers = [
 # stdlib tomllib module, added in Python 3.11 (not 3.10, tomllib does not
 # exist there). Every import across formatscout/ (excluding tests/)
 # is either stdlib (hashlib, json, re, struct, sys, zlib, dataclasses,
-# difflib, pathlib, typing, logging, xml.etree.ElementTree, argparse) or a
+# difflib, pathlib, typing, logging, xml.etree.ElementTree, argparse, os,
+# tempfile, urllib.request, tomllib) or a
 # same-package relative import, confirmed by grepping every `^import `/
 # `^from ` line in the package. No third-party runtime dependency exists.
 requires-python = ">=3.11"
@@ -49,6 +50,12 @@ test = ["pytest", "pytest-cov"]
 [project.urls]
 Homepage = "https://github.com/rymorrisj/formatscout"
 Repository = "https://github.com/rymorrisj/formatscout"
+
+[tool.pytest.ini_options]
+markers = [
+    "network: test needs real network access",
+    "large: test creates very large (sparse) files",
+]
 
 [tool.coverage.run]
 source = ["formatscout"]
