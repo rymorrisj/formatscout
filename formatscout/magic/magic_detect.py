@@ -53,8 +53,10 @@ def resolve_ps_generation_from_file(cnf_path: Path) -> str:
     within this module, so it is not underscore-prefixed despite not being
     part of the public formatscout.__init__ surface.
 
-    Returns "unknown" if the file cannot be read. Never a guessed console.
-    Callers must treat "unknown" as no signal, not as PS1.
+    Returns "ps2" if the text BOOT2 appears in the first 512 bytes, otherwise
+    "ps1". So any readable file without BOOT2 (including an empty or garbage
+    file) is reported as "ps1". Returns "unknown" only when the file cannot be
+    opened or read. Callers must treat "unknown" as no signal, not as PS1.
     """
     try:
         with cnf_path.open("rb") as fh:
@@ -95,8 +97,11 @@ def _read_mode2_user_data(fh: BinaryIO, start_lba: int, length: int) -> bytes:
 def _resolve_ps_generation(path: Path) -> str:
     """Classify PS1 vs PS2 from a raw CD-ROM sector read.
 
-    Returns "unknown" whenever SYSTEM.CNF cannot be located or read. Never
-    a guessed console.
+    Returns "unknown" when the PVD, the root directory, or the SYSTEM.CNF
+    entry cannot be read or located. Once SYSTEM.CNF is read, the result is
+    "ps2" if BOOT2 appears in its text and "ps1" otherwise, so a readable
+    SYSTEM.CNF with no BOOT2 key (including an empty one) is reported as
+    "ps1". A SYSTEM.CNF entry with size 0 is read as 512 bytes.
 
     The sync pattern that gates this call is a generic Mode 2 CD-ROM
     marker. It is not proof the disc is a PlayStation title. Callers must

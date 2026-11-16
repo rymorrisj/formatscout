@@ -16,9 +16,15 @@ def resolve_bin_cue(
     Resolve platform for a .bin file using its sibling .cue sheet.
 
     Pipeline:
-      1. Locate sibling .cue by stem (case-insensitive).
-      2. If found: parse first TRACK type, then re-run magic on .bin.
-         Magic takes precedence (0.85); track type used as secondary signal.
+      1. Locate a .cue in the same directory whose stem matches the .bin's
+         stem (case-insensitive). The .cue's FILE line is not consulted, so a
+         .cue that references a differently named .bin is not found.
+      2. If found: parse first TRACK type, then re-run magic on .bin. A magic
+         hit returns 0.85 with the track type as secondary signal. Both
+         production callers already ran magic on this .bin and only reach
+         here when it returned no era, so in the normal pipeline the re-run
+         finds nothing and the track type decides the result. The 0.85 branch
+         is reached only when this function is called directly.
       3. If no .cue: return low-confidence result with actionable warning.
 
     dir_cache: caller-owned {parent_dir: entries} map so repeated calls in one

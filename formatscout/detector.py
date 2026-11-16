@@ -74,7 +74,8 @@ def _detect(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> Scan
             reason="path does not exist",
         )
 
-    # Tier 1: hash lookup, highest confidence, return immediately on match.
+    # Tier 1: hash lookup, highest confidence, return immediately on a match
+    # that resolves an era (a match with era=None falls through to Tier 2+).
     # Directories are a first-class input (Tier 4), not a hashable file, so
     # skip this tier for them entirely rather than reaching hash_file()'s
     # path.open("rb") only to fail.

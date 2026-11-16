@@ -52,7 +52,8 @@ DIRECTORY_DEPTH2_SCAN_CAP_ENTRIES = 4096
 
 # ~800 MB, the CD-vs-DVD size split. Previously three independent literals
 # (chd_validator.py, iso_detect.py, detector.py) that all meant the same
-# heuristic boundary. Decimal, matching how optical media capacity is quoted.
+# heuristic boundary. Binary: 800 MiB (800 * 1024 * 1024 = 838,860,800 bytes),
+# not 800 million bytes.
 CD_SIZE_THRESHOLD_BYTES = 800 * 1024 * 1024
 
 # The 4.7 GB DVD-5 boundary iso_detect.detect_from_pvd() uses to split a

@@ -40,13 +40,13 @@ Requires Python 3.11+ (`magic_detect.py` reads `magic_signatures.toml` via stdli
 
 ## Detection pipeline
 
-Runs in tier order, stops at the first confident match.
+For a file, Tier 1 runs first and returns immediately on any hash hit (sha1, md5 or crc32) whose index entry has a non-None `era`. Otherwise one branch is chosen by file suffix, and that branch's result is final: no later tier is consulted, even if it returns low confidence or `era=None`. Directories skip Tier 1 and go straight to directory heuristics. There is no confidence threshold in the pipeline. The table below lists signal types, not a cascade.
 
 | Tier | Resolution Strategy | Description | Confidence Range |
 |---|---|---|---|
-| 1 | Hash Lookup | Full-file SHA-1 (MD5/CRC32 fallback) matched against the bundled preservation index. CHD containers match on the embedded `rawsha1` header field instead of raw file bytes. | 1.0 |
+| 1 | Hash Lookup | Full-file SHA-1 (MD5/CRC32 fallback) matched against the preservation index cached at `~/.formatscout/hash_index.json`. CHD containers match on the embedded `rawsha1` header field instead of raw file bytes. | 1.0 |
 | 2 | Magic Bytes | Header signature matching at fixed byte offsets. Covers PS1, PS2, N64, NES, Dreamcast. | 0.9 |
-| 3 | Structural Parsing | ISO 9660 PVD sector inspection, CHD v5 metadata walking, PE executable subsystem/OS parsing. | 0.65 – 0.9 |
+| 3 | Structural Parsing | ISO 9660 PVD sector inspection, CHD v5 metadata walking, PE executable subsystem/OS parsing. | 0.3 – 0.9 (0.3 is the CHD CHTR/CHT2 size guess) |
 | 4 | Directory Heuristics | AUTORUN.INF targets, root-level system markers (PS3_DISC.SFB, I386, SYSTEM.CNF, WIN98/95), depth-2 executable scans. | 0.4 – 0.9 |
 | 5 | Extension & Size | File extension alone, or extension plus size for ambiguous cases (e.g. 4 GiB optical boundary). | 0.2 – 0.7 |
 
@@ -57,7 +57,7 @@ flowchart TD
     Start(["detect(path, dir_cache)"]) --> Exists{"path.exists()?"}
     Exists -- "no" --> RNone["ScanResult(confidence=0.0,<br/>reason='path does not exist')"]
 
-    Exists -- "yes" --> Hash["Tier 1: hash_lookup.lookup()<br/>sha1 (or CHD embedded rawsha1) -&gt; md5 -&gt; crc32<br/>against hashing/hash_index.json"]
+    Exists -- "yes" --> Hash["Tier 1: hash_lookup.lookup()<br/>sha1 (or CHD embedded rawsha1) -&gt; md5 -&gt; crc32<br/>against ~/.formatscout/hash_index.json"]
     Hash -- "era resolved (confidence 1.0 / 0.85 / 0.75)" --> Stamp
     Hash -- "no match / index missing" --> Kind{"file or directory?"}
 
@@ -101,7 +101,7 @@ flowchart TD
 
 PE parsing (`.exe` files and `AUTORUN.INF` targets) is handled by `exe_detect.detect_exe()` and `directory_detect._detect_from_pe()`, which both delegate the header classification (MZ/PE checks, `Subsystem` gate, `MajorOperatingSystemVersion` split) to a shared `exe_detect._classify_pe_header()` helper; only the reason text they build from it differs. `test_directory_detect.py` pins that the two stay in agreement.
 
-`_compute_requires_install()` in `detector.py` runs after era detection and flags DOS-era installer media. That includes raw `.iso`/`.cue` files, small `.img` files, and directories whose only root-level executables are on the blocklist in `utils/blocklist.py`.
+`_compute_requires_install()` in `detector.py` runs after era detection and only sets `requires_install` when `era == "dos"`. A DOS-era `.iso` or `.cue` is always flagged. A DOS-era `.img` is flagged only when it is under 2 MiB. A DOS-era `.bin` is never flagged, even though its `.cue` would be. A directory is flagged when it has at least one root-level `.exe`, `.com` or `.bat`, and every one of them is on the blocklist in `utils/blocklist.py`.
 
 ## Usage
 
@@ -124,7 +124,7 @@ hashes = hash_file(Path("game.iso"))
 hashes.sha1, hashes.md5, hashes.crc32
 ```
 
-Check `scan.era` for `None` to decide whether `detect()` succeeded. `scan.warnings` can be populated even on a successful low-confidence match.
+Check `scan.era` for `None` to decide whether `detect()` found a platform. A non-None era can still be a low-confidence guess: a CHD CHTR/CHT2 size guess is 0.3, a `.img` under 800 MiB is `dos` at 0.35, extension-only matches are 0.5 to 0.7, and a crc32 index hit is 0.75. Also check `confidence`, `reason` and `warnings`. No field marks a result as authoritative yet.
 
 ### Public API
 
@@ -144,7 +144,7 @@ Ten names are exported from `__init__.py`. Everything else is internal.
 
 Detection logic (tiers 2-5) covers **PS1, PS2, PS3, Xbox, Xbox 360, Dreamcast, N64, NES, SNES, DOS, Windows 95, Windows 98, and Windows XP**.
 
-The bundled hash index (`hash_index.json`) has confirmed entries for more platforms than earlier notes suggested. At minimum: PlayStation, PlayStation 2, PlayStation 3, Xbox, Dreamcast, SNES, and NES. Example entry:
+The hash index (`hash_index.json`, cached at `~/.formatscout/`) has confirmed entries for more platforms than earlier notes suggested. At minimum: PlayStation, PlayStation 2, PlayStation 3, Xbox, Dreamcast, SNES, and NES. Example entry:
 
 <details>
 <summary><b>Click to view example of an <code>hash_index.json</code> entries</b></summary>
@@ -175,7 +175,7 @@ The bundled hash index (`hash_index.json`) has confirmed entries for more platfo
 ```
 </details>
 
-**Xbox 360** has an `_ERA_MARKERS` mapping and hash-index entries, but no structural/directory detection path exists for it yet in tiers 2-5. It's reachable only via a Tier 1 hash hit.
+**Xbox 360** has an `_ERA_MARKERS` mapping and hash-index entries, but no structural or directory detection path exists for it yet. Outside Tier 1, the only Xbox 360 signal is a `.xex` file suffix, which returns `xbox360` at 0.7 from the extension alone. Xbox 360 disc images are not separated from original Xbox: a disc image with the XDVDFS magic at 0x10000 is reported as era `xbox` whatever its generation, and so is a raw DVD rip over 4 GiB.
 
 ## Adding a new DAT
 
@@ -184,19 +184,18 @@ python -m formatscout.hashing.build_index \
     --dats <directory-of-dat-files> [--output <path>] [--rebuild]
 ```
 
-Manual process, no ingestion automation. Sourced from [Redump](http://redump.org/), [No-Intro](https://datomatic.no-intro.org/), and [TOSEC](https://www.tosecdev.org/). Only records with a `sha1` value get indexed. MD5/CRC32-only entries parse without error but contribute zero rows. The run logs a skipped-record count, so this isn't silent.
+Manual process, no ingestion automation. Sourced from [Redump](http://redump.org/), [No-Intro](https://datomatic.no-intro.org/), and [TOSEC](https://www.tosecdev.org/). Only records with a `sha1` value get indexed. MD5/CRC32-only entries parse without error but contribute zero rows. The run logs a skipped-record count, so this isn't silent. `build_index`'s default `--output` is `formatscout/hashing/hash_index.json` inside the package directory. The runtime never reads that path. It reads `~/.formatscout/hash_index.json`, so a locally built index is not used by `detect()`, `classify()` or `verify()` unless it is copied there.
 
 DAT files are third-party, untrusted input. `dat_parser.parse_dat()` rejects any DAT that declares XML entities in its DOCTYPE internal subset, guarding against the entity-expansion vector in `ElementTree`. Real Logiqx/Redump/No-Intro external DOCTYPEs are unaffected. The index write is atomic, a temp file plus `os.replace()`, so an interrupted run leaves the previous index intact.
 
 ## Known limitations
 
-- Xbox OG ISOs with no `.xbe` in the root directory fall through to `xbox_image.py`'s byte-offset check. The magic-byte tier doesn't apply here since no `.iso` signature exists. This is rare in practice. Standard rips include `DEFAULT.XBE`.
+- Xbox OG ISOs with no `.xbe` in the root directory fall through to `xbox_image.py`'s byte-offset check. The magic-byte tier doesn't apply here since no `.iso` signature exists. The `.xbe` check only reads an ISO 9660 root directory located through the PVD, and the code never parses XDVDFS directory entries. XDVDFS images (xISO) have no ISO 9660 PVD, so they are identified only by the XDVDFS magic. Whether real Xbox rips carry `DEFAULT.XBE` in an ISO 9660 root is unverified.
 - `.bin`/`.cue` pairs missing their `.cue` sibling return low confidence with a warning.
 - Every entry point takes a local, seekable `Path`. No stream or object-storage handle support.
-- Only `detect()` is exception-safe end to end. `classify()` catches `OSError` → `status="unchecked"`. `verify()` and `hash_file()` let read errors propagate.
+- `detect()` never raises. `classify()` returns `status="unchecked"` only for an `OSError` while hashing the file. With the default index path, index errors are not caught: a failed download (`urllib` `URLError` or `TimeoutError`), a sha256 mismatch (`ValueError`), or a corrupt cached `hash_index.json` (`json.JSONDecodeError`) propagates out of `classify()` and `verify()`. `detect()` catches these, logs a warning, and continues without the hash tier. `verify()` and `hash_file()` let read errors propagate.
 - Size thresholds use different units by design. The Xbox DVD-rip/ISO-fallback boundary is binary 4 GiB. The PS1/PS2 boundary in `detect_from_pvd()` is decimal 4.7GB, matching how disc capacities are usually quoted.
 - `requires_extraction` is only set by the Xbox DVD-rip path today. Callers run their own conversion tooling, such as extract-xiso. This package only detects the need.
-- `hash_index.json` (~88MB) ships inside the package directory today. No decision yet on in-repo vs. release asset vs. separate data distribution long-term.
 - `hash_index.json` is not bundled in the installed distribution. It is downloaded once on first hash lookup, verified against a hardcoded sha256, and cached under `~/.formatscout/`. That first run requires network access; there is no offline fallback.
 
 ## Backlog

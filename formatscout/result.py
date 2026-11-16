@@ -70,12 +70,19 @@ class VerifyResult:
     from ScanResult, which is detect()'s full-pipeline identification result.
 
     status:
-        "matched", computed sha1 is present in the hash index and equals
-            expected_sha1.
-        "mismatched", computed sha1 is present in the hash index but does
-            not equal expected_sha1 (the file changed since it was recorded).
-        "not_in_index", computed sha1 is not present in the hash index at
-            all, regardless of expected_sha1.
+        "not_in_index", checked first: computed sha1 is not a key in the
+            hash index. This applies even when computed sha1 equals
+            expected_sha1. A file that changed since it was recorded usually
+            gets a new sha1 that is not in the index, so it lands here.
+        "matched", computed sha1 is in the hash index and equals
+            expected_sha1. The comparison is exact and case-sensitive;
+            expected_sha1 is not normalized.
+        "mismatched", computed sha1 is in the hash index but differs from
+            expected_sha1. In practice this means the file is a different
+            indexed file.
+
+    The hash is over the raw file bytes, including for .chd files. The
+    embedded CHD rawsha1 is not used here.
     """
     status: Literal["matched", "mismatched", "not_in_index"]
     computed_sha1: str
@@ -93,20 +100,27 @@ class ClassifyResult:
     status:
         "verified", sha1 (or, for a CHD container, its embedded rawsha1)
             exactly matches a hash_index.json entry. Highest confidence, the
-            only state that should ever read as a positive confirmation.
+            only state that should ever read as a positive confirmation. For
+            a CHD, the rawsha1 is read from the header and is not checked
+            against the image data.
         "caution", no sha1 match, but md5 or crc32 exactly matches an entry.
             Real index coverage, weaker confidence than a sha1 hit.
         "mismatch", no hash of any kind matched, but the title is an
             approximate (>=threshold) match for a title that does exist in
             hash_index.json. Expected to happen often against an inherently
             incomplete public hash catalog, not itself a sign the file is
-            bad. Deliberately conservative, an ambiguous or below-threshold
-            title match never produces this state, it falls through to
-            "not_in_index" instead. A false "mismatch" must never fire.
+            bad. The title match is the single best difflib SequenceMatcher
+            ratio over titles with the same era, after bracketed tags are
+            stripped, and it counts only if it reaches the threshold (default
+            0.80). There is no ambiguity check: near-identical titles, such as
+            sequels that differ only by a number, can clear the threshold and
+            produce this state.
         "not_in_index", no hash matched and no confident title match either.
             Neutral, "we have no data on this file", not a warning.
         "unchecked", the file could not be hashed at all (missing, unreadable,
-            permission error). No classification was possible.
+            permission error). No classification was possible. Only an OSError
+            from hashing produces this state. Index download and index JSON
+            errors are not caught here and propagate to the caller.
 
     computed_sha1 is the file's own raw sha1 (hash_file()'s result), persisted
     whenever hashing succeeds, regardless of which status was reached. It is

@@ -15,9 +15,11 @@ _META_CHGD = b"CHGD"  # GD-ROM track, Dreamcast only
 _META_OFFSET_POS = 48
 
 # CHD v5 fixed header layout (chd.h): rawsha1 is the SHA1 of the raw/uncompressed
-# hunk data, the value that matches Redump's published per-image hash. The
-# adjacent `sha1` field (offset 84) additionally folds in metadata and will not
-# match Redump, so it is intentionally not used here.
+# hunk data as chdman stores it. For CD CHDs that data is 2448-byte frames (a
+# 2352-byte sector plus 96 bytes of subcode) plus track padding, so it cannot
+# equal Redump's per-track .bin SHA1. For DVD CHDs it may equal the ISO's SHA1,
+# which is unverified here. The adjacent `sha1` field (offset 84) additionally
+# folds in metadata, so it is intentionally not used here.
 _RAWSHA1_OFFSET = 64
 _RAWSHA1_LEN = 20
 
@@ -40,7 +42,8 @@ def extract_embedded_sha1(path: Path) -> str | None:
     No hunk decompression, this only reads header bytes. Returns None on any
     read error, on a header too short to contain the field, or on an
     all-zero field. An all-zero field means unset: some chdman versions
-    omit it for non-CD types.
+    omit it for non-CD types. The value is returned as stored in the header
+    and is never checked against the hunk data.
     """
     try:
         with path.open("rb") as fh:
