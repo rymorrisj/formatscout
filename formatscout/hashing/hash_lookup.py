@@ -90,8 +90,13 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 # Quarantine names tried in order: .corrupt, .corrupt.1 ... .corrupt.5.
 _QUARANTINE_SLOTS = 6
 
-# Cached per index_path: (mtime, sha1_index, md5_index, crc32_index). Keyed by mtime
-# so a rebuilt hash_index.json (via build_index.py) is picked up without a restart.
+# The parsed index of the one path used most recently: {index_path: (mtime,
+# sha1_index, md5_index, crc32_index)}. Holds at most ONE entry, because a parsed
+# real index is ~88MB on disk and several times that as Python objects; loading
+# a different path (or a changed mtime) evicts the previous entry before the new
+# file is parsed. Keyed by mtime so a rebuilt hash_index.json (via build_index.py)
+# is picked up without a restart. Alternating between two index paths therefore
+# re-parses on every switch; use one path per process for the hot path.
 _index_cache: dict[Path, tuple[float, dict, dict, dict]] = {}
 
 
@@ -763,6 +768,8 @@ def _cache_provenance_ok(path: Path, stat: os.stat_result, recorded: tuple[str, 
 
 def _parse_index(index_path: Path) -> tuple[dict, dict, dict]:
     """mtime-cached parse of *index_path* into (sha1, md5, crc32) indices.
+    The cache holds one entry (see _index_cache): parsing a different path
+    evicts the previous one.
 
     Refuses files over _MAX_INDEX_BYTES before json.load(). Raises
     IndexIntegrityError for an oversized, non-JSON, or malformed file.
@@ -777,6 +784,10 @@ def _parse_index(index_path: Path) -> tuple[dict, dict, dict]:
         raise IndexIntegrityError(
             f"index file is {stat.st_size} bytes, over the {_MAX_INDEX_BYTES} byte limit"
         )
+
+    # Evict before parsing, not after storing, so two parsed indexes are never
+    # alive at once (a failed parse then also leaves the cache empty, never stale).
+    _index_cache.clear()
 
     try:
         with index_path.open("r", encoding="utf-8") as fh:
@@ -802,22 +813,12 @@ def _parse_index(index_path: Path) -> tuple[dict, dict, dict]:
     return index, md5_index, crc32_index
 
 
-def _load_default_index(path: Path, fetch_opts: dict[str, Any] | None = None) -> tuple[dict, dict, dict]:
-    """Load the default cache, checking provenance only if we downloaded it.
-
-    A file with a valid sidecar (written by our download) is "managed": once
-    per process per (path, size, mtime_ns) it is compared with the sidecar
-    and the pin (see _cache_provenance_ok); a mismatch quarantines it and
-    refetches under the normal backoff rules. A file with no usable sidecar is
-    user-supplied (for example one built with build_index.py): it gets only
-    the size cap and JSON validity checks, is never hashed for the pin, and is
-    never quarantined; if it is unusable the error says to delete it.
-
-    A freshly downloaded file is pin-verified by the download itself. A
-    managed file that fails to parse is quarantined and refetched.
-
-    *fetch_opts* (timeout / max_download_bytes) is passed through to every
-    download this load triggers.
+def _prepare_default_index(path: Path, fetch_opts: dict[str, Any] | None = None) -> tuple[bool, bool]:
+    """Everything _load_default_index() does before parsing: download a missing
+    default cache and decide whether the file there is "managed" (we downloaded
+    it, so it is pin-checked and may be quarantined) or user-supplied. Returns
+    (managed, fresh). Never parses the index. See _load_default_index() for
+    the rules.
     """
     opts = fetch_opts or {}
     fresh = False
@@ -845,6 +846,28 @@ def _load_default_index(path: Path, fetch_opts: dict[str, Any] | None = None) ->
             _fetch_default_index(**opts)
             fresh = managed = True
             _mark_verified(path)
+    return managed, fresh
+
+
+def _load_default_index(path: Path, fetch_opts: dict[str, Any] | None = None) -> tuple[dict, dict, dict]:
+    """Load the default cache, checking provenance only if we downloaded it.
+
+    A file with a valid sidecar (written by our download) is "managed": once
+    per process per (path, size, mtime_ns) it is compared with the sidecar
+    and the pin (see _cache_provenance_ok); a mismatch quarantines it and
+    refetches under the normal backoff rules. A file with no usable sidecar is
+    user-supplied (for example one built with build_index.py): it gets only
+    the size cap and JSON validity checks, is never hashed for the pin, and is
+    never quarantined; if it is unusable the error says to delete it.
+
+    A freshly downloaded file is pin-verified by the download itself. A
+    managed file that fails to parse is quarantined and refetched.
+
+    *fetch_opts* (timeout / max_download_bytes) is passed through to every
+    download this load triggers.
+    """
+    opts = fetch_opts or {}
+    managed, fresh = _prepare_default_index(path, opts)
 
     try:
         return _parse_index(path)
@@ -931,3 +954,63 @@ def load_index(
         raise IndexUnavailable(
             f"cannot read the hash index at {index_path} ({type(exc).__name__})"
         ) from exc
+
+
+def validate_index_file(
+    index_path: Path, *, timeout: float | None = None, max_download_bytes: int | None = None,
+) -> None:
+    """Check that a usable index file is at *index_path* without parsing it or
+    caching anything: the memory-light counterpart of load_index(), used by
+    ensure_index().
+
+    Same path rules as load_index(). The default cache is downloaded when
+    missing and, when it carries our sidecar, pin-checked (and quarantined and
+    refetched if modified); any other path is user-supplied, never downloaded
+    to, pin-checked or moved. Both must exist, be readable and be within the
+    256 MiB load cap. JSON validity is NOT checked here: a corrupt or
+    non-object file is only found by the first load_index() (so for a managed
+    default file that is also when it is quarantined and refetched).
+
+    Raises FileNotFoundError for a missing non-default path, IndexUnavailable
+    for everything load_index() maps to it, and IndexIntegrityError for an
+    oversized file.
+    """
+    if is_default_cache_path(index_path):
+        fetch_opts = {
+            key: value for key, value in (("timeout", timeout), ("max_download_bytes", max_download_bytes))
+            if value is not None
+        }
+        try:
+            _prepare_default_index(index_path, fetch_opts)
+            _check_readable_within_cap(index_path)
+        except IndexUnavailable:
+            raise
+        except FileNotFoundError as exc:
+            raise IndexUnavailable("hash index cache disappeared while loading") from exc
+        except OSError as exc:
+            raise IndexUnavailable(f"cannot read the hash index cache ({type(exc).__name__})") from exc
+        return
+
+    try:
+        if not index_path.exists():
+            raise FileNotFoundError(
+                f"Hash index not found at {index_path}. "
+                "Run build_index.py to generate it from your DAT files."
+            )
+        _check_readable_within_cap(index_path)
+    except (IndexUnavailable, FileNotFoundError):
+        raise
+    except OSError as exc:
+        raise IndexUnavailable(
+            f"cannot read the hash index at {index_path} ({type(exc).__name__})"
+        ) from exc
+
+
+def _check_readable_within_cap(index_path: Path) -> None:
+    """stat and open *index_path* for reading (one byte, nothing retained) and
+    refuse a file over _MAX_INDEX_BYTES, the same message _parse_index() uses."""
+    size = index_path.stat().st_size
+    if size > _MAX_INDEX_BYTES:
+        raise IndexIntegrityError(f"index file is {size} bytes, over the {_MAX_INDEX_BYTES} byte limit")
+    with index_path.open("rb") as fh:
+        fh.read(1)

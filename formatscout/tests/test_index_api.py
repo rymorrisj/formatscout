@@ -299,7 +299,20 @@ class TestEnsureIndexDefaultCache:
         assert result == env.index_path
         assert env.opener.calls == 1
         assert env.names() == ["hash_index.json", "hash_index.json.meta"]
-        assert env.index_path in hash_lookup._index_cache  # parsed once, ready for detect()
+        assert env.index_path not in hash_lookup._index_cache  # validated, not parsed: first use parses
+
+    def test_does_not_parse_or_cache_the_index(self, env: _Env, monkeypatch):
+        _install_managed(env)
+        hash_lookup._index_cache.clear()
+
+        def _no_parse(path):
+            raise AssertionError("ensure_index() must not parse the index")
+
+        monkeypatch.setattr(hash_lookup, "_parse_index", _no_parse)
+
+        assert ensure_index() == env.index_path
+        assert ensure_index(force=True) == env.index_path
+        assert hash_lookup._index_cache == {}
 
     def test_valid_cache_needs_no_network(self, env: _Env):
         _install_managed(env)
@@ -444,15 +457,29 @@ class TestEnsureIndexUserSuppliedPath:
         assert env.opener.calls == 0
         assert not missing.exists()
 
-    def test_corrupt_file_is_an_integrity_error_and_is_left_in_place(self, env: _Env, tmp_path: Path):
+    def test_invalid_json_is_not_found_by_ensure_index_but_at_first_use(self, env: _Env, tmp_path: Path):
         bad = _corrupt_index(tmp_path)
         before = bad.read_bytes()
+        hash_lookup._index_cache.clear()
 
+        assert ensure_index(bad) == bad  # exists, readable, within the cap: JSON is not parsed here
+
+        assert hash_lookup._index_cache == {}
         with pytest.raises(IndexIntegrityError):
-            ensure_index(bad)
-
+            hash_lookup.load_index(bad)  # first use finds it
+        with pytest.raises(IndexIntegrityError):
+            _classify_module.classify(_game(tmp_path), "t", "ps1", index_path=bad, strict=True)
         assert bad.read_bytes() == before
         assert not bad.with_name(bad.name + ".corrupt").exists()
+
+    def test_user_supplied_ensure_index_does_not_populate_the_parse_cache(self, env: _Env, tmp_path: Path):
+        custom = fx.write_synthetic_index(tmp_path)
+        hash_lookup._index_cache.clear()
+
+        assert ensure_index(custom) == custom
+        assert ensure_index(custom, max_bytes=custom.stat().st_size, force=True) == custom
+
+        assert hash_lookup._index_cache == {}
 
     def test_max_bytes_caps_the_file_before_parsing(self, tmp_path: Path):
         custom = fx.write_synthetic_index(tmp_path)
@@ -462,17 +489,21 @@ class TestEnsureIndexUserSuppliedPath:
 
         assert ensure_index(custom, max_bytes=custom.stat().st_size) == custom
 
-    def test_force_on_a_custom_path_revalidates_and_never_downloads(self, env: _Env, tmp_path: Path):
+    def test_force_on_a_custom_path_drops_its_parse_cache_and_never_downloads(self, env: _Env, tmp_path: Path):
         custom = fx.write_synthetic_index(tmp_path)
-        ensure_index(custom)
+        hash_lookup.load_index(custom)  # a real use populates the cache
         before = custom.stat()
         custom.write_text("{ now broken", encoding="utf-8")
         os.utime(custom, ns=(before.st_atime_ns, before.st_mtime_ns))  # same mtime: the parse cache still hits
 
-        assert ensure_index(custom) == custom  # served from the in-process cache
+        assert ensure_index(custom) == custom
+        assert custom in hash_lookup._index_cache  # a plain ensure_index leaves the cache alone
+        hash_lookup.load_index(custom)  # still served from the in-process cache
 
+        assert ensure_index(custom, force=True) == custom  # force drops that path's cache, no parse
+        assert custom not in hash_lookup._index_cache
         with pytest.raises(IndexIntegrityError):
-            ensure_index(custom, force=True)  # force drops the cache and re-validates
+            hash_lookup.load_index(custom)  # the broken file now surfaces at first use
 
         assert env.opener.calls == 0
         assert custom.read_text(encoding="utf-8") == "{ now broken"

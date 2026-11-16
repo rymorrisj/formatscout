@@ -179,6 +179,66 @@ class TestLoadIndexMtimeCache:
 
         assert index1 is index2
 
+    def test_cache_holds_one_entry_and_loading_another_path_evicts_the_first(self, tmp_path: Path):
+        hash_lookup = _hash_lookup_module()
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        first = fx.write_synthetic_index(tmp_path / "a")
+        second = fx.write_synthetic_index(tmp_path / "b")
+        hash_lookup._index_cache.clear()
+
+        index_a, _, _ = hash_lookup.load_index(first)
+        assert list(hash_lookup._index_cache) == [first]
+
+        hash_lookup.load_index(second)
+        assert list(hash_lookup._index_cache) == [second]  # the count is 1, not 2
+
+        index_a_again, _, _ = hash_lookup.load_index(first)
+        assert list(hash_lookup._index_cache) == [first]
+        assert index_a_again is not index_a  # re-parsed after eviction
+        assert index_a_again == index_a
+
+    def test_changed_mtime_replaces_the_entry_instead_of_adding_one(self, tmp_path: Path):
+        hash_lookup = _hash_lookup_module()
+        index_path = fx.write_synthetic_index(tmp_path)
+        hash_lookup._index_cache.clear()
+        hash_lookup.load_index(index_path)
+
+        new_mtime = index_path.stat().st_mtime + 5
+        os.utime(index_path, (new_mtime, new_mtime))
+        hash_lookup.load_index(index_path)
+
+        assert list(hash_lookup._index_cache) == [index_path]
+
+    def test_failed_parse_of_another_path_leaves_no_stale_entry(self, tmp_path: Path):
+        hash_lookup = _hash_lookup_module()
+        (tmp_path / "a").mkdir()
+        good = fx.write_synthetic_index(tmp_path / "a")
+        bad_dir = tmp_path / "b"
+        bad_dir.mkdir()
+        bad = bad_dir / "hash_index.json"
+        bad.write_text("{ not json", encoding="utf-8")
+        hash_lookup._index_cache.clear()
+        hash_lookup.load_index(good)
+
+        with pytest.raises(hash_lookup.IndexIntegrityError):
+            hash_lookup.load_index(bad)
+
+        assert hash_lookup._index_cache == {}
+
+    def test_forget_index_is_safe_for_cached_and_unknown_paths(self, tmp_path: Path):
+        hash_lookup = _hash_lookup_module()
+        index_path = fx.write_synthetic_index(tmp_path)
+        hash_lookup._index_cache.clear()
+        hash_lookup.load_index(index_path)
+
+        hash_lookup.forget_index(tmp_path / "never_loaded.json")
+        assert list(hash_lookup._index_cache) == [index_path]
+
+        hash_lookup.forget_index(index_path)
+        hash_lookup.forget_index(index_path)  # twice is fine
+        assert hash_lookup._index_cache == {}
+
     def test_missing_index_raises_file_not_found(self, tmp_path: Path):
         hash_lookup = _hash_lookup_module()
         missing = tmp_path / "does_not_exist.json"

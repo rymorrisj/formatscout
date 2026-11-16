@@ -28,9 +28,22 @@ def ensure_index(
 
     *path* is resolved like the ``index_path`` of detect(): the argument, else
     FORMATSCOUT_INDEX_PATH, else the default cache ``~/.formatscout/
-    hash_index.json``. On success the index has been loaded and parsed once
-    (it stays cached in this process), so a later detect()/classify()/verify()
-    on the same path does no further index work.
+    hash_index.json``. On success the file is on disk and passed the checks
+    below, but it has NOT been parsed and nothing is cached in this process:
+    the first detect()/classify()/verify() on the path parses it (a real index
+    is ~88 MB on disk and several times that in memory), so ensure_index() is
+    cheap to call and cannot itself exhaust memory.
+
+    What it checks: the file exists (downloaded first, for the default
+    location), is readable, is within the 256 MiB load cap, and, for the
+    managed default file, still matches the download pin (see below). It does
+    not check JSON validity. A user-supplied file that is not valid JSON, or
+    not a JSON object of objects, is therefore returned as usable here and
+    surfaces at first use: detect() skips the hash tier with an
+    INDEX_UNAVAILABLE issue, classify()/verify() return "unchecked" with the
+    same issue, and strict=True raises IndexIntegrityError. A managed default
+    file that fails to parse is quarantined and re-downloaded at that first
+    use, under the normal backoff rules.
 
     One rule decides what happens to the resolved path:
 
@@ -42,16 +55,16 @@ def ensure_index(
       ``.corrupt.1`` ... ``.corrupt.5``, never overwriting an earlier copy)
       and re-downloaded. An existing file with no sidecar is user-supplied
       (for example one built with ``build_index``): it only gets the size cap
-      and JSON validity check, and is never replaced.
+      check (JSON validity is left to first use), and is never replaced.
     * It is anything else (an explicit path, or one from the environment): a
-      user-supplied file. ensure_index validates it (exists, within the size
-      cap, valid JSON of the expected shape) and returns it. It never
+      user-supplied file. ensure_index validates it (exists, readable, within
+      the size cap) and returns it. It never
       downloads to it, never pin-checks it, never moves it, and ignores any
       sidecar next to it.
 
     *force* is a user-requested refresh and only has an effect on the default
     cache location (for any other path it just drops the in-process parse
-    cache and re-validates the file). It re-downloads even when a valid index
+    cache for that path and re-validates the file). It re-downloads even when a valid index
     exists, and it ignores the failure backoff window (never
     FORMATSCOUT_OFFLINE). The new body is downloaded and pin-verified first,
     so a failed refresh leaves whatever is at the path untouched. Then a
@@ -64,7 +77,7 @@ def ensure_index(
     *timeout* is the per-socket-operation timeout in seconds (default 30; the
     whole download is separately bounded by a 600 s deadline). *max_bytes* is
     the download size cap (default 128 MiB) and, for a path other than the
-    default cache location, an extra size cap checked before parsing. The
+    default cache location, an extra size cap checked on the file's size. The
     256 MiB load cap applies to every index file regardless, so max_bytes can
     only tighten it, and a no-sidecar file at the default location gets only
     that load cap. Both are for this call only.
@@ -74,9 +87,9 @@ def ensure_index(
     download failed or exceeded a cap, the file at a user-supplied path is
     missing or unreadable, or the home directory is needed and unknown. Raises
     IndexIntegrityError, a subclass of IndexUnavailable, when what was found
-    or downloaded cannot be trusted: a sha256 mismatch, or an index file that
-    is oversized, not valid JSON, or malformed. Raises ValueError/TypeError
-    for a bad argument.
+    or downloaded cannot be trusted: a sha256 mismatch or an oversized index
+    file (invalid or malformed JSON is only detected at first use, see above).
+    Raises ValueError/TypeError for a bad argument.
     """
     if timeout is not None and (
         isinstance(timeout, bool) or not isinstance(timeout, (int, float))
@@ -91,7 +104,7 @@ def ensure_index(
     if _hash_lookup.is_default_cache_path(resolved):
         if force:
             _hash_lookup._fetch_default_index(timeout=timeout, max_download_bytes=max_bytes, force=True)
-        _hash_lookup.load_index(resolved, timeout=timeout, max_download_bytes=max_bytes)
+        _hash_lookup.validate_index_file(resolved, timeout=timeout, max_download_bytes=max_bytes)
         return resolved
 
     _validate_user_supplied(resolved, force=force, max_bytes=max_bytes)
@@ -99,7 +112,8 @@ def ensure_index(
 
 
 def _validate_user_supplied(path: Path, *, force: bool, max_bytes: int | None) -> None:
-    """Check the user-supplied index at *path*, raising the public errors."""
+    """Check the user-supplied index at *path* (exists, readable, size caps)
+    without parsing it, raising the public errors."""
     if force:
         _hash_lookup.forget_index(path)
     if max_bytes is not None:
@@ -112,7 +126,7 @@ def _validate_user_supplied(path: Path, *, force: bool, max_bytes: int | None) -
         if size is not None and size > max_bytes:
             raise IndexIntegrityError(f"index file is {size} bytes, over the {max_bytes} byte limit")
     try:
-        _hash_lookup.load_index(path)
+        _hash_lookup.validate_index_file(path)
     except FileNotFoundError as exc:
         raise IndexUnavailable(
             f"no hash index at {path}; ensure_index() only downloads to the default cache location "

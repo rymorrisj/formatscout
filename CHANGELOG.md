@@ -10,7 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `ensure_index(path=None, *, force=False, timeout=None, max_bytes=None)`
   returns the path of a usable hash index, downloading it first when the
-  default cache has none. For any other path it only validates the file. With
+  default cache has none. For any other path it only validates the file. It
+  never parses the index or caches it: it checks existence, readability, the
+  256 MiB size cap and, for the managed default file, the download pin. JSON
+  validity of a user-supplied file is not checked, so a malformed one surfaces
+  at first use as `IndexUnavailable` (`INDEX_UNAVAILABLE` from `detect()`,
+  `classify()` and `verify()`). With
   `force=True` it re-downloads (ignoring the failure backoff, never offline
   mode); the new file is verified before anything is touched, a pristine copy
   of an earlier download is replaced, and any other file at the cache path is
@@ -40,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reason are unchanged). See the README's Result contract section.
 
 ### Changed
+- The in-process parsed-index cache keeps at most one entry: loading a
+  different index path (or a rebuilt file) evicts the previous parsed index
+  before parsing, instead of retaining one ~88 MB index per path.
 - `classify()` and `verify()` no longer raise by default when the index is
   unavailable (offline mode, backoff, failed download, oversized, corrupt or
   unreadable index). They return `status="unchecked"` with an
