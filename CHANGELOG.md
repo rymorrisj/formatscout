@@ -83,9 +83,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The title matcher (`fuzzy_title_match`, internal) now searches every era and
   returns the top candidates, requires the numbers in both titles (digits and
   Roman numerals) to match, caps the query at 256 characters and prefilters
-  with `real_quick_ratio` and `quick_ratio`. `classify()` reports
-  `WRONG_ERA`, with `matched_era` set, when the best match lies outside the
-  supplied era.
+  with `real_quick_ratio` and `quick_ratio`. `classify()` searches the
+  supplied era on its own first, so other-era variants cannot push out an
+  exact match there, and reports `WRONG_ERA`, with `matched_era` set, only when
+  the supplied era has no match at or above the threshold and another era does.
+- A CHD header `rawsha1` claim no longer returns before the structural check:
+  it is reconciled with the CHD tags like an md5 or crc32 hit (agreement is
+  corroboration, disagreement keeps the tag result with `CONFLICTING_EVIDENCE`,
+  no tag result is a weak 0.45 guess), and the container always comes from the
+  tags. A filename-only title match now scores 0.40 (was 0.5), below any
+  result read from the file's bytes with an era.
 - `classify()` reports a CHD header `rawsha1` hit as `caution` with the issue
   `CLAIM_UNVERIFIED` instead of `verified`: the header is not checked against
   the image data. `Method.TITLE_MATCH` and the `IssueCode` enum
@@ -96,8 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ~88 MB index per path. A different index path (or a rebuilt file) replaces
   it only once the new file has parsed, so a failed load keeps the working
   entry; the cost is that two parsed indexes are alive at once while a
-  replacement loads. The title cache likewise keeps one entry, and both are
-  guarded by a lock.
+  replacement loads. The title cache likewise keeps one index entry, with one
+  table per requested era, is stored only when the index file did not change
+  while it loaded, is cleared by `forget_index`, and both are guarded by a
+  lock.
 - `classify()` and `verify()` no longer raise by default when the index is
   unavailable (offline mode, backoff, failed download, oversized, corrupt or
   unreadable index). They return `status="unchecked"` with an

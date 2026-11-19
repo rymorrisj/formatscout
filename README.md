@@ -40,11 +40,11 @@ Requires Python 3.11+ (`magic_detect.py` reads `magic_signatures.toml` via stdli
 
 ## Detection pipeline
 
-For a file, Tier 1 runs first. A sha1 hit on a non-CHD file whose index entry has a non-None `era`, and a CHD header `rawsha1` hit, return immediately. An md5 or crc32 hit does not: it is held back, the suffix branch below runs, and the two are reconciled (structural evidence wins and a disagreement adds `CONFLICTING_EVIDENCE`; a hash hit with nothing else to go on is returned as a weak guess with `HASH_WEAK`). Otherwise one branch is chosen by file suffix, and that branch's result is final: no later tier is consulted, even if it returns low confidence or `era=None`. Directories skip Tier 1 and go straight to directory heuristics. There is no confidence threshold in the pipeline. The table below lists signal types, not a cascade.
+For a file, Tier 1 runs first. Only a sha1 hit on a non-CHD file whose index entry has a non-None `era` returns immediately. An md5 or crc32 hit, and a CHD header `rawsha1` claim, do not: they are held back, the suffix branch below runs (for a `.chd`, `detect_chd`), and the two are reconciled with one rule (the claim agrees with the structural evidence: it is recorded as corroboration; it disagrees: the structural result wins and adds `CONFLICTING_EVIDENCE`; there is no usable structural result: the hit is returned as a weak guess, `HASH_WEAK` for md5/crc32 and `CLAIM_UNVERIFIED` for a CHD claim). Otherwise one branch is chosen by file suffix. That branch's result is not revisited by the other signal tiers, even if it returns low confidence or `era=None`, with two exceptions: the held-back hash hit above, and a `.chd` left `container_only` with candidates, which gets one filename-title match against the index (see CHD resolution). A filename-only title match scores 0.40, below any result read from the file's bytes with an era. Directories skip Tier 1 and go straight to directory heuristics. There is no confidence threshold in the pipeline. The table below lists signal types, not a cascade.
 
 | Tier | Resolution Strategy | Description | Confidence Range |
 |---|---|---|---|
-| 1 | Hash Lookup | Full-file SHA-1 (MD5/CRC32 fallback) matched against the preservation index cached at `~/.formatscout/hash_index.json`. CHD containers match on the embedded `rawsha1` header field instead of raw file bytes (a claim, never proof). | 1.0 (sha1), 0.85 / 0.75 as corroboration (md5 / crc32), 0.45 / 0.35 when alone |
+| 1 | Hash Lookup | Full-file SHA-1 (MD5/CRC32 fallback) matched against the preservation index cached at `~/.formatscout/hash_index.json`. CHD containers match on the embedded `rawsha1` header field instead of raw file bytes (a claim, never proof). | 1.0 (sha1), 0.85 / 0.75 as corroboration (md5 / crc32), 0.45 / 0.35 when alone (0.45 for a CHD claim alone) |
 | 2 | Magic Bytes | Header signature matching at fixed byte offsets. Covers PS1, PS2, N64, NES, Dreamcast. | 0.9 |
 | 3 | Structural Parsing | ISO 9660 PVD sector inspection, SYSTEM.CNF `BOOT`/`BOOT2` keys, XDVDFS root directory (`DEFAULT.XBE`/`DEFAULT.XEX`), CHD v5 metadata tags, PE executable subsystem/OS parsing. | 0.3 – 0.9 |
 | 4 | Directory Heuristics | AUTORUN.INF targets, root-level system markers (PS3_DISC.SFB, I386, SYSTEM.CNF, WIN98/95), depth-2 executable scans. | 0.4 – 0.9 |
@@ -58,8 +58,8 @@ flowchart TD
     Exists -- "no" --> RNone["ScanResult(confidence=0.0,<br/>reason='path does not exist')"]
 
     Exists -- "yes" --> Hash["Tier 1: hash_lookup.lookup()<br/>sha1 (or CHD embedded rawsha1) -&gt; md5 -&gt; crc32<br/>against ~/.formatscout/hash_index.json"]
-    Hash -- "sha1 or CHD header claim with era (1.0)" --> Stamp
-    Hash -- "no match / index missing / md5 or crc32 hit (held back, reconciled later)" --> Kind{"file or directory?"}
+    Hash -- "sha1 hit on a non-CHD file with an era (1.0)" --> Stamp
+    Hash -- "no match / index missing / md5, crc32 or CHD header claim (held back, reconciled with the suffix result)" --> Kind{"file or directory?"}
 
     Kind -- neither --> RBad["ScanResult(confidence=0.0,<br/>reason='not a file or directory')"]
     Kind -- file --> FileDispatch["_detect_file(): dispatch on suffix"]
@@ -82,11 +82,11 @@ flowchart TD
     IsoPvd -- "PS3_DISC.SFB in root dir" --> IsoR2["era=ps3, 0.9"]
     IsoPvd -- ".XBE in root dir" --> IsoR3["era=xbox, 0.8"]
     IsoPvd -- "volume label / publisher keyword (Windows, then DOS after the PlayStation checks)" --> IsoR4["era=winxp/win98/win95/dos, 0.7-0.75"]
-    IsoPvd -- "serial-shaped label, Sony publisher or keyless SYSTEM.CNF" --> IsoAmb["era=None, ambiguous,<br/>candidates ps1 / ps2"]
-    IsoPvd -- "no PVD signal" --> XboxImg["xbox_image.probe_xbox_image()<br/>(XDVDFS descriptor, bounded root walk)"]
+    IsoPvd -- "no era from the PVD (including a PlayStation-shaped but ambiguous PVD)" --> XboxImg["xbox_image.probe_xbox_image()<br/>(XDVDFS descriptor, bounded root walk)"]
     XboxImg -- "XDVDFS @ 0x10000, DEFAULT.XBE / DEFAULT.XEX in root" --> IsoR5["era=xbox / xbox360, 0.9,<br/>not authoritative"]
     XboxImg -- "XDVDFS with neither executable, or an XGD layout at another offset" --> IsoR6["era=None, container_only,<br/>candidates xbox / xbox360<br/>(XGD offsets: UNSUPPORTED_LAYOUT,<br/>requires_extraction when positively identified)"]
-    XboxImg -- "no XDVDFS magic" --> IsoFb["Tier 5: _iso_size_fallback()<br/>size gives candidates only, never an era; an iso9660<br/>confirmation keeps confidence at 0.2 instead of 'no signal found'"]
+    XboxImg -- "no XDVDFS magic, PVD was serial-shaped label, Sony publisher or keyless SYSTEM.CNF" --> IsoAmb["era=None, ambiguous,<br/>candidates ps1 / ps2"]
+    XboxImg -- "no XDVDFS magic, any other PVD" --> IsoFb["Tier 5: _iso_size_fallback()<br/>size gives candidates only, never an era; an iso9660<br/>confirmation keeps confidence at 0.2 instead of 'no signal found'"]
 
     DirDispatch --> Autorun["Tier 4a: _detect_from_autorun()<br/>AUTORUN.INF OPEN=/RUN= -&gt; pointed .exe's PE header"]
     Autorun -- "era resolved" --> AutoR["era=dos/win98/winxp, 0.65-0.75"]
@@ -135,7 +135,7 @@ hashes.sha1, hashes.md5, hashes.crc32
 
 ### Result contract
 
-Use `status` and `authoritative`, not "is `era` None", to interpret a `ScanResult`. `era`, `confidence`, `reason` and `warnings` are unchanged: `era` still carries guesses (a `.img` under 800 MiB as `dos` at 0.35, extension-only matches at 0.5 to 0.7, a CHD GD-ROM tag as `dreamcast`, an exact CHD filename-title match, a lone crc32 hit at 0.35 or md5 hit at 0.45, a CHD header hash hit at 1.0), but nothing derives an era from a CHD's logical size, and a PlayStation disc whose `SYSTEM.CNF` cannot be read is `ambiguous` between `ps1` and `ps2`, never silently `ps1`. The new fields are keyword-only with defaults, so positional construction of `ScanResult` still works.
+Use `status` and `authoritative`, not "is `era` None", to interpret a `ScanResult`. `era`, `confidence`, `reason` and `warnings` are unchanged: `era` still carries guesses (a `.img` under 800 MiB as `dos` at 0.35, extension-only matches at 0.5 to 0.7, a CHD GD-ROM tag as `dreamcast`, an exact CHD filename-title match at 0.40, a lone crc32 hit at 0.35 or md5 hit at 0.45, a CHD header hash claim at 0.45 alone, or at the claim's own 1.0 when it picks among the CHD tag's candidates), but nothing derives an era from a CHD's logical size, and a PlayStation disc whose `SYSTEM.CNF` cannot be read is `ambiguous` between `ps1` and `ps2`, never silently `ps1`. The new fields are keyword-only with defaults, so positional construction of `ScanResult` still works.
 
 | `status` | `era` | Meaning |
 |---|---|---|
@@ -153,9 +153,9 @@ Other fields, all defaulted:
 
 - `method`: the rule that produced the result. One of `hash_sha1`, `hash_md5`, `hash_crc32`, `chd_header_claim` (index hit on the CHD header's embedded `rawsha1`: a claim, not checked against the hunks), `magic`, `structural`, `system_cnf`, `directory_marker`, `pe_header`, `extension`, `size_heuristic`, `title_match` (an exact normalized filename-title match against the index, within a CHD's candidate eras), `none` (no rule produced a signal).
 - `container`: `iso9660`, `xdvdfs`, `bin_cue`, `chd` (no recognised media tag, or an unsupported header version), `chd_cd` (CHT2, CHTR or CHCD tag), `chd_dvd` (DVD tag) or `chd_gd` (CHGD or CHGT tag) when confirmed, else None.
-- `candidates`: `Candidate(era, tier, evidence)` tuples for `ambiguous` results.
+- `candidates`: `Candidate(era, tier, evidence)` tuples for `ambiguous` results and for `container_only` results where the container narrows the eras (a CD or DVD CHD, an XDVDFS volume with no or both executables).
 - `evidence`: short stable codes for the specific signals, such as `pvd_volume_label_keyword`.
-- `issues`: `Issue(code, message)` tuples, for example `INDEX_UNAVAILABLE` (the hash tier did not run), `POINTER_REJECTED`, `UNEXPECTED_ERROR`, and the `IssueCode` members `CLAIM_UNVERIFIED`, `HASH_WEAK` (era from an md5 or crc32 hit alone), `CONFLICTING_EVIDENCE` (a hash hit named another era than the structure; the structure wins), `WRONG_ERA`, `AMBIGUOUS_CONTAINER` (several candidate eras matched a CHD's title), `UNSUPPORTED_LAYOUT` (a recognised container layout that is not parsed, such as a full XGD image) and `CHD_VERSION_UNSUPPORTED` (only CHD header version 5 is read). `warnings` is still filled in as before.
+- `issues`: `Issue(code, message)` tuples, for example `INDEX_UNAVAILABLE` (the hash tier did not run), `POINTER_REJECTED`, `UNEXPECTED_ERROR`, and the `IssueCode` members `CLAIM_UNVERIFIED`, `HASH_WEAK` (era from an md5 or crc32 hit alone), `CONFLICTING_EVIDENCE` (a hash hit named another era than the structure; the structure wins), `WRONG_ERA`, `AMBIGUOUS_CONTAINER` (several candidate eras matched a CHD's title), `UNSUPPORTED_LAYOUT` (a recognised container layout that is not parsed, such as a full XGD image) `CHD_VERSION_UNSUPPORTED` (only CHD header version 5 is read), `CHD_HEADER_INVALID` (a v5 header whose length field is not 124: `container_only`, no era) and `CHD_HEADER_TRUNCATED` (the header ends before a field that is needed). `warnings` is still filled in as before.
 - `platform_hint`: a platform the signal points at when `platform` is not set (for example `Nintendo DS` for `.nds`).
 
 `Status`, `Method`, `Tier` and `IssueCode` are `StrEnum`s, so `scan.status == "guess"` works. Constructing a `ScanResult` with contradictory values (an era-less result marked authoritative, an era with a status other than `identified`/`guess`) raises `ValueError`.
@@ -303,7 +303,7 @@ DAT files are third-party, untrusted input. `dat_parser.parse_dat()` rejects any
 uv run pytest formatscout/tests/
 ```
 
-Known gaps: `title_match.py` and `xbox_image.py` have no dedicated test file. Each is reached only indirectly through another module's tests.
+Known gap: `xbox_image.py` has no dedicated test file. It is reached only indirectly through `iso_detect` tests.
 
 ## Contributing
 

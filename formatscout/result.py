@@ -214,8 +214,10 @@ class ScanResult:
         tag, or an unsupported header version), "chd_cd" (CHT2, CHTR or CHCD
         tag), "chd_dvd" (DVD tag) or "chd_gd" (CHGD or CHGT tag). None
         otherwise.
-    candidates: for ambiguous results, the eras the signal narrows to, as
-        Candidate(era, tier, evidence_codes) tuples.
+    candidates: the eras the signal narrows to, as Candidate(era, tier,
+        evidence_codes) tuples. Set for ambiguous results and for
+        container_only results whose container narrows the eras (a CD or DVD
+        CHD, an XDVDFS volume with no or both executables); empty otherwise.
     evidence: short stable codes for the specific signals behind the result
         (e.g. "pvd_volume_label_keyword"), finer-grained than method.
     issues: Issue(code, message) tuples for problems worth acting on (index
@@ -349,15 +351,17 @@ class ClassifyResult:
             approximate (>=threshold) match for a title that does exist in
             hash_index.json. Expected to happen often against an inherently
             incomplete public hash catalog, not itself a sign the file is
-            bad. The title match is the best difflib SequenceMatcher ratio
-            over the titles of every era (a tie goes to the supplied era),
+            bad. The title match is the best difflib SequenceMatcher ratio,
             after bracketed tags are stripped, and it counts only if it
             reaches the threshold (default 0.80) and the numbers in both
             titles (digits and Roman numerals) are equal, so sequels that
-            differ only by a number do not match. If the best match lies in
-            a different era than the one supplied, the status is still
-            "mismatch" but matched_era names that era and the issue
-            WRONG_ERA is added. With era=None the title search is skipped.
+            differ only by a number do not match. The supplied era is
+            searched on its own first: a match there at or above the
+            threshold is used, even if another era scores higher. Only when
+            the supplied era has no such match are the other eras searched,
+            and if one matches the status is still "mismatch" but
+            matched_era names that era and the issue WRONG_ERA is added.
+            With era=None the title search is skipped.
         "not_in_index", no hash matched and no confident title match either.
             Neutral, "we have no data on this file", not a warning.
         "unchecked", no classification was possible, for one of two reasons
