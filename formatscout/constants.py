@@ -23,12 +23,10 @@ ROOT_DIR_READ_CAP_BYTES = 64 * 1024
 # the user-data payload carried inside each larger physical sector.
 ISO_LOGICAL_SECTOR_BYTES = 2048
 
-# The "larger than a single-layer disc image" boundary, shared by
-# xbox_image.detect_xbox_image_type()'s raw-DVD-rip check and
-# iso_detect._iso_size_fallback()'s size heuristic. Previously these were two
-# separate literals (4_000_000_000 decimal and 4 * 1024 ** 3 binary), so a file
-# between them landed on opposite sides of the same nominal 4 GB line depending
-# on which code path reached it first. Binary GB (4 GiB).
+# The "larger than a single-layer disc image" boundary used by
+# iso_detect._iso_size_fallback()'s size heuristic, which only produces
+# candidate eras, never an era (no Xbox rip rule is based on it any more).
+# Binary GB (4 GiB).
 #
 # Distinct from the 4.7 GB DVD-5 boundary in iso_detect.detect_from_pvd()
 # (DVD5_SIZE_THRESHOLD_BYTES below), which is deliberately decimal because
@@ -66,9 +64,10 @@ DVD5_SIZE_THRESHOLD_BYTES = 4_700_000_000
 # No DEFAULT_INDEX_PATH constant here. hash_lookup.default_index_path() is
 # the single source of truth for that path; detector.py, classify.py, and
 # verify.py each call it directly rather than this module re-exporting it.
-# Importing formatscout.hashing here would pull in validators.chd_validator,
-# which imports CD_SIZE_THRESHOLD_BYTES back from this module, a real
-# circular import: constants -> hash_lookup -> chd_validator -> constants.
+# Importing formatscout.hashing here would pull in validators.chd_validator
+# and the rest of the hashing package, which this module must not depend on:
+# constants -> hash_lookup -> chd_validator would be a circular import if
+# either ever imports a constant back from here.
 # Sequencing around it (importing hash_lookup after the constants it needs
 # are defined) previously "worked" for normal imports but broke
 # test_magic_detect.py's isolated-package-copy test, which copies only

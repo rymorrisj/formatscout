@@ -45,6 +45,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reason are unchanged). See the README's Result contract section.
 
 ### Changed
+- Detection no longer guesses PS1 or Xbox from sizes. A cooked ISO's root
+  `SYSTEM.CNF` is read: key `BOOT2` is ps2 and key `BOOT` is ps1 (method
+  `system_cnf`, authoritative). The same strict key match applies to raw
+  `.bin` and directories, so a missing, empty or garbage `SYSTEM.CNF` names no
+  era. A serial-shaped label, a Sony publisher or a keyless `SYSTEM.CNF` with
+  nothing readable is `ambiguous` with candidates `ps1` and `ps2`, never
+  `ps1`; a stat failure gives no era; size only orders candidates. The plain
+  ISO check also requires `CD001`, and the DOS publisher keyword rule now runs
+  after the PlayStation checks.
+- Xbox: an ISO 9660 image over 4 GiB with no other signal has no era (it is no
+  longer an Xbox DVD rip). An XDVDFS volume at 0x10000 is read with a bounded
+  root directory walk (4096 entries, depth 256): `DEFAULT.XBE` is `xbox`,
+  `DEFAULT.XEX` is `xbox360`, otherwise `container_only` with candidates `xbox`
+  and `xbox360`. Other XGD layouts return the same candidates with
+  `UNSUPPORTED_LAYOUT`. `requires_extraction` is set only when XDVDFS is
+  positively identified at an XGD offset. The directory entry layout and the
+  offsets are unverified against real media.
+- CHD: only header version 5 is read (any other version is no era with
+  `CHD_VERSION_UNSUPPORTED`, and `extract_embedded_sha1` returns None for it).
+  No era comes from the logical size. `CHT2`/`CHTR`/`CHCD` give container
+  `chd_cd` (candidates `ps1`, `ps2`), the DVD tag gives `chd_dvd` (candidates
+  `ps2`, `xbox`, `xbox360`), `CHGD`/`CHGT` give `dreamcast` as a
+  non-authoritative guess with container `chd_gd`. The `CHT2` text payload
+  (capped at 4 KB) is evidence only.
+- A CD or DVD CHD with candidates is resolved by an exact normalized
+  filename-title match against the index titles of the candidate eras only
+  (method `title_match`, a non-authoritative guess). One matching era sets it,
+  several stay ambiguous with `AMBIGUOUS_CONTAINER`, none leaves the result
+  unchanged, and an unavailable index skips the step. A CHD such as
+  `Ico (USA).chd` is no longer labelled `ps1`.
+- An md5 or crc32 hit no longer returns before the structural checks. If the
+  structure agrees it is corroboration, if it disagrees the structure wins
+  with `CONFLICTING_EVIDENCE`, and a hash hit alone is a weak guess
+  (`HASH_WEAK`, not authoritative, reduced confidence). A sha1 hit on a
+  non-CHD file still returns immediately and stays authoritative.
+- The title matcher (`fuzzy_title_match`, internal) now searches every era and
+  returns the top candidates, requires the numbers in both titles (digits and
+  Roman numerals) to match, caps the query at 256 characters and prefilters
+  with `real_quick_ratio` and `quick_ratio`. `classify()` reports
+  `WRONG_ERA`, with `matched_era` set, when the best match lies outside the
+  supplied era.
 - `classify()` reports a CHD header `rawsha1` hit as `caution` with the issue
   `CLAIM_UNVERIFIED` instead of `verified`: the header is not checked against
   the image data. `Method.TITLE_MATCH` and the `IssueCode` enum

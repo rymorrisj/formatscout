@@ -185,11 +185,12 @@ class ScanResult:
     with confidence, plus flags describing what a caller must do before the
     media is usable.
 
-    requires_extraction: set only by iso_detect.detect_iso() when the file
-        is identified as a raw Xbox DVD rip (valid ISO 9660 magic, but past
-        the xISO size threshold). True means the caller must run extract-xiso
-        on it before launch, mirrors requires_install's "not directly usable
-        yet" role but for a format-conversion step instead of an install step.
+    requires_extraction: set only by iso_detect.detect_iso() when an XDVDFS
+        volume is positively identified at an XGD game-partition offset (a
+        raw Xbox/360 DVD rip, not a bare xISO). True means the caller must run
+        extract-xiso on it before launch, mirrors requires_install's "not
+        directly usable yet" role but for a format-conversion step instead of
+        an install step. Never set from file size.
 
     The fields above are unchanged; era is still populated exactly as before
     (including guesses). The keyword-only fields below say how to read it:
@@ -209,7 +210,10 @@ class ScanResult:
         index stores no sizes yet), so both are False. Always False when era
         is None.
     container: the confirmed container/filesystem, when one was confirmed:
-        "iso9660", "xdvdfs", "chd" or "bin_cue". None otherwise.
+        "iso9660", "xdvdfs", "bin_cue", "chd" (a CHD with no recognised media
+        tag, or an unsupported header version), "chd_cd" (CHT2, CHTR or CHCD
+        tag), "chd_dvd" (DVD tag) or "chd_gd" (CHGD or CHGT tag). None
+        otherwise.
     candidates: for ambiguous results, the eras the signal narrows to, as
         Candidate(era, tier, evidence_codes) tuples.
     evidence: short stable codes for the specific signals behind the result
@@ -345,12 +349,15 @@ class ClassifyResult:
             approximate (>=threshold) match for a title that does exist in
             hash_index.json. Expected to happen often against an inherently
             incomplete public hash catalog, not itself a sign the file is
-            bad. The title match is the single best difflib SequenceMatcher
-            ratio over titles with the same era, after bracketed tags are
-            stripped, and it counts only if it reaches the threshold (default
-            0.80). There is no ambiguity check: near-identical titles, such as
-            sequels that differ only by a number, can clear the threshold and
-            produce this state.
+            bad. The title match is the best difflib SequenceMatcher ratio
+            over the titles of every era (a tie goes to the supplied era),
+            after bracketed tags are stripped, and it counts only if it
+            reaches the threshold (default 0.80) and the numbers in both
+            titles (digits and Roman numerals) are equal, so sequels that
+            differ only by a number do not match. If the best match lies in
+            a different era than the one supplied, the status is still
+            "mismatch" but matched_era names that era and the issue
+            WRONG_ERA is added. With era=None the title search is skipped.
         "not_in_index", no hash matched and no confident title match either.
             Neutral, "we have no data on this file", not a warning.
         "unchecked", no classification was possible, for one of two reasons
@@ -376,9 +383,9 @@ class ClassifyResult:
     unchanged):
 
     matched_era: the era of the index entry a hash matched ("verified",
-        "caution"), or, for "mismatch", the era the title search was scoped
-        to (every candidate title carries it). None otherwise, and None when
-        the matched entry's era is missing or not a string.
+        "caution"), or, for "mismatch", the era of the matched title (the
+        supplied era, unless WRONG_ERA is reported). None otherwise, and None
+        when the matched entry's era is missing or not a string.
     hash_kind: which hash matched: "sha1" (the file's own sha1),
         "chd_rawsha1" (a CHD header's embedded rawsha1), "md5" or "crc32".
         None when no hash matched.

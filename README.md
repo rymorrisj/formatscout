@@ -40,13 +40,13 @@ Requires Python 3.11+ (`magic_detect.py` reads `magic_signatures.toml` via stdli
 
 ## Detection pipeline
 
-For a file, Tier 1 runs first and returns immediately on any hash hit (sha1, md5 or crc32) whose index entry has a non-None `era`. Otherwise one branch is chosen by file suffix, and that branch's result is final: no later tier is consulted, even if it returns low confidence or `era=None`. Directories skip Tier 1 and go straight to directory heuristics. There is no confidence threshold in the pipeline. The table below lists signal types, not a cascade.
+For a file, Tier 1 runs first. A sha1 hit on a non-CHD file whose index entry has a non-None `era`, and a CHD header `rawsha1` hit, return immediately. An md5 or crc32 hit does not: it is held back, the suffix branch below runs, and the two are reconciled (structural evidence wins and a disagreement adds `CONFLICTING_EVIDENCE`; a hash hit with nothing else to go on is returned as a weak guess with `HASH_WEAK`). Otherwise one branch is chosen by file suffix, and that branch's result is final: no later tier is consulted, even if it returns low confidence or `era=None`. Directories skip Tier 1 and go straight to directory heuristics. There is no confidence threshold in the pipeline. The table below lists signal types, not a cascade.
 
 | Tier | Resolution Strategy | Description | Confidence Range |
 |---|---|---|---|
-| 1 | Hash Lookup | Full-file SHA-1 (MD5/CRC32 fallback) matched against the preservation index cached at `~/.formatscout/hash_index.json`. CHD containers match on the embedded `rawsha1` header field instead of raw file bytes. | 1.0 |
+| 1 | Hash Lookup | Full-file SHA-1 (MD5/CRC32 fallback) matched against the preservation index cached at `~/.formatscout/hash_index.json`. CHD containers match on the embedded `rawsha1` header field instead of raw file bytes (a claim, never proof). | 1.0 (sha1), 0.85 / 0.75 as corroboration (md5 / crc32), 0.45 / 0.35 when alone |
 | 2 | Magic Bytes | Header signature matching at fixed byte offsets. Covers PS1, PS2, N64, NES, Dreamcast. | 0.9 |
-| 3 | Structural Parsing | ISO 9660 PVD sector inspection, CHD v5 metadata walking, PE executable subsystem/OS parsing. | 0.3 – 0.9 (0.3 is the CHD CHTR/CHT2 size guess) |
+| 3 | Structural Parsing | ISO 9660 PVD sector inspection, SYSTEM.CNF `BOOT`/`BOOT2` keys, XDVDFS root directory (`DEFAULT.XBE`/`DEFAULT.XEX`), CHD v5 metadata tags, PE executable subsystem/OS parsing. | 0.3 – 0.9 |
 | 4 | Directory Heuristics | AUTORUN.INF targets, root-level system markers (PS3_DISC.SFB, I386, SYSTEM.CNF, WIN98/95), depth-2 executable scans. | 0.4 – 0.9 |
 | 5 | Extension & Size | File extension alone, or extension plus size for ambiguous cases (e.g. 4 GiB optical boundary). | 0.2 – 0.7 |
 
@@ -58,8 +58,8 @@ flowchart TD
     Exists -- "no" --> RNone["ScanResult(confidence=0.0,<br/>reason='path does not exist')"]
 
     Exists -- "yes" --> Hash["Tier 1: hash_lookup.lookup()<br/>sha1 (or CHD embedded rawsha1) -&gt; md5 -&gt; crc32<br/>against ~/.formatscout/hash_index.json"]
-    Hash -- "era resolved (confidence 1.0 / 0.85 / 0.75)" --> Stamp
-    Hash -- "no match / index missing" --> Kind{"file or directory?"}
+    Hash -- "sha1 or CHD header claim with era (1.0)" --> Stamp
+    Hash -- "no match / index missing / md5 or crc32 hit (held back, reconciled later)" --> Kind{"file or directory?"}
 
     Kind -- neither --> RBad["ScanResult(confidence=0.0,<br/>reason='not a file or directory')"]
     Kind -- file --> FileDispatch["_detect_file(): dispatch on suffix"]
@@ -70,7 +70,7 @@ flowchart TD
     FileDispatch --> IsoBranch[".iso -&gt; detect_iso()"]
     FileDispatch --> BinBranch[".bin -&gt; Tier 2 magic (0.9) -&gt; Tier 3 PVD (0.7-0.9)<br/>-&gt; bin_validator.resolve_bin_cue() (0.2-0.85)"]
     FileDispatch --> CueBranch[".cue -&gt; detect_cue(): find sibling .bin<br/>(none found -&gt; 0.0 + warning); found -&gt; same<br/>magic -&gt; PVD -&gt; resolve_bin_cue() chain as .bin"]
-    FileDispatch --> ChdBranch[".chd -&gt; chd_validator.detect_chd_platform(): CHD v5 metadata chain<br/>CHGD tag -&gt; dreamcast 0.85; CHTR/CHT2 -&gt; ps1/ps2 by<br/>logical size, 0.3 heuristic; no tag -&gt; 0.0"]
+    FileDispatch --> ChdBranch[".chd -&gt; chd_validator.detect_chd_platform(): CHD v5 metadata chain<br/>CHGD/CHGT -&gt; dreamcast 0.85 (guess); CHT2/CHTR/CHCD -&gt; no era, candidates ps1/ps2;<br/>DVD tag -&gt; no era, candidates ps2/xbox/xbox360; other versions or no tag -&gt; no era.<br/>Never an era from size. Then a filename-title match across the candidate eras"]
     FileDispatch --> ImgBranch[".img -&gt; Tier 5 size fallback:<br/>era=dos 0.35 if &lt;800MB, else 0.0"]
     FileDispatch --> ExeBranch[".exe -&gt; exe_detect.detect_exe(): Tier 3 PE header<br/>MajorOSVersion/Subsystem -&gt; dos 0.65 / win98 0.75 /<br/>winxp 0.75; else 0.0"]
     FileDispatch --> NoSig["no suffix match -&gt; confidence=0.0"]
@@ -78,23 +78,24 @@ flowchart TD
     IsoBranch --> IsoMagic["Tier 2 magic (applies_to='iso';<br/>no signature targets .iso today -&gt; always falls through)"]
     IsoMagic -- match --> IsoR1["confidence=0.9"]
     IsoMagic -- "no match" --> IsoPvd["Tier 3: detect_from_pvd()<br/>ISO 9660 PVD @ sector 16"]
+    IsoPvd -- "SYSTEM.CNF in root: BOOT2 / BOOT key" --> IsoR1b["era=ps2 / ps1, system_cnf, authoritative"]
     IsoPvd -- "PS3_DISC.SFB in root dir" --> IsoR2["era=ps3, 0.9"]
     IsoPvd -- ".XBE in root dir" --> IsoR3["era=xbox, 0.8"]
-    IsoPvd -- "volume label / publisher keyword" --> IsoR4["era=winxp/win98/win95/dos/ps1/ps2, 0.7-0.75"]
-    IsoPvd -- "no PVD signal" --> XboxImg["xbox_image.detect_xbox_image_type()<br/>(internal module, byte-offset check only)"]
-    XboxImg -- "'xiso' (XDVDFS magic @ 0x10000)" --> IsoR5["era=xbox, 0.9"]
-    XboxImg -- "'dvd_rip' (ISO9660 magic, size &gt; 4GB)" --> IsoR6["era=xbox, 0.9<br/>requires_extraction=True"]
-    XboxImg -- "'iso9660' (container confirmed, no platform)" --> IsoFb
-    XboxImg -- "'unknown'" --> IsoFb["Tier 5: _iso_size_fallback()<br/>by size vs 4 GiB / 800MB -&gt; 0.0-0.2<br/>era stays None; an iso9660 confirmation keeps<br/>confidence at 0.2 instead of 'no signal found'"]
+    IsoPvd -- "volume label / publisher keyword (Windows, then DOS after the PlayStation checks)" --> IsoR4["era=winxp/win98/win95/dos, 0.7-0.75"]
+    IsoPvd -- "serial-shaped label, Sony publisher or keyless SYSTEM.CNF" --> IsoAmb["era=None, ambiguous,<br/>candidates ps1 / ps2"]
+    IsoPvd -- "no PVD signal" --> XboxImg["xbox_image.probe_xbox_image()<br/>(XDVDFS descriptor, bounded root walk)"]
+    XboxImg -- "XDVDFS @ 0x10000, DEFAULT.XBE / DEFAULT.XEX in root" --> IsoR5["era=xbox / xbox360, 0.9,<br/>not authoritative"]
+    XboxImg -- "XDVDFS with neither executable, or an XGD layout at another offset" --> IsoR6["era=None, container_only,<br/>candidates xbox / xbox360<br/>(XGD offsets: UNSUPPORTED_LAYOUT,<br/>requires_extraction when positively identified)"]
+    XboxImg -- "no XDVDFS magic" --> IsoFb["Tier 5: _iso_size_fallback()<br/>size gives candidates only, never an era; an iso9660<br/>confirmation keeps confidence at 0.2 instead of 'no signal found'"]
 
     DirDispatch --> Autorun["Tier 4a: _detect_from_autorun()<br/>AUTORUN.INF OPEN=/RUN= -&gt; pointed .exe's PE header"]
     Autorun -- "era resolved" --> AutoR["era=dos/win98/winxp, 0.65-0.75"]
     Autorun -- "no signal" --> DirHeur["Tier 4b: _detect_from_directory()"]
-    DirHeur -- "root marker files (PS3_DISC.SFB, XPSP/I386, WIN98/95,<br/>SYSTEM.CNF, INSTALL.*)" --> DirR3["era resolved by marker, 0.4-0.9<br/>(PS3_DISC.SFB checked first -&gt; ps3 0.9;<br/>SYSTEM.CNF via magic_detect.resolve_ps_generation_from_file)"]
+    DirHeur -- "root marker files (PS3_DISC.SFB, XPSP/I386, WIN98/95,<br/>SYSTEM.CNF, INSTALL.*)" --> DirR3["era resolved by marker, 0.4-0.9<br/>(PS3_DISC.SFB checked first -&gt; ps3 0.9;<br/>SYSTEM.CNF via magic_detect.resolve_ps_generation_from_file: a BOOT2 or BOOT key, no key means no era)"]
     DirHeur -- "depth-2 scan (DOS tools, .WAD,<br/>split archives, .BAT, DOS-only exts)" --> DirR4["era=dos, 0.5-0.6"]
     DirHeur -- "nothing matched" --> DirR5["confidence=0.0"]
 
-    ExtOnly & GdCdi & IsoR1 & IsoR2 & IsoR3 & IsoR4 & IsoR5 & IsoR6 & IsoFb & BinBranch & CueBranch & ChdBranch & ImgBranch & ExeBranch & NoSig & AutoR & DirR3 & DirR4 & DirR5 --> Stamp
+    ExtOnly & GdCdi & IsoR1 & IsoR1b & IsoR2 & IsoR3 & IsoR4 & IsoAmb & IsoR5 & IsoR6 & IsoFb & BinBranch & CueBranch & ChdBranch & ImgBranch & ExeBranch & NoSig & AutoR & DirR3 & DirR4 & DirR5 --> Stamp
 
     Stamp["_compute_requires_install(path, result.era)<br/>sets ScanResult.requires_install"] --> Final(["ScanResult returned to caller<br/>(detect() wraps all of this in try/except,<br/>any unexpected error -&gt; confidence=0.0)"])
 ```
@@ -134,30 +135,32 @@ hashes.sha1, hashes.md5, hashes.crc32
 
 ### Result contract
 
-Use `status` and `authoritative`, not "is `era` None", to interpret a `ScanResult`. `era`, `confidence`, `reason` and `warnings` are unchanged: `era` is populated exactly as before, guesses included (a CHD CHTR/CHT2 size guess at 0.3, a `.img` under 800 MiB as `dos` at 0.35, extension-only matches at 0.5 to 0.7, a crc32 index hit at 0.75, an md5 hit at 0.85, a CHD header hash hit at 1.0). The new fields are keyword-only with defaults, so positional construction of `ScanResult` still works.
+Use `status` and `authoritative`, not "is `era` None", to interpret a `ScanResult`. `era`, `confidence`, `reason` and `warnings` are unchanged: `era` still carries guesses (a `.img` under 800 MiB as `dos` at 0.35, extension-only matches at 0.5 to 0.7, a CHD GD-ROM tag as `dreamcast`, an exact CHD filename-title match, a lone crc32 hit at 0.35 or md5 hit at 0.45, a CHD header hash hit at 1.0), but nothing derives an era from a CHD's logical size, and a PlayStation disc whose `SYSTEM.CNF` cannot be read is `ambiguous` between `ps1` and `ps2`, never silently `ps1`. The new fields are keyword-only with defaults, so positional construction of `ScanResult` still works.
 
 | `status` | `era` | Meaning |
 |---|---|---|
 | `identified` | set | Determined from proof; `authoritative` is True. |
-| `guess` | set | **Transitional.** Set from a heuristic (size threshold, extension, directory marker, PE OS version, volume label, SYSTEM.CNF default, CHD header hash claim, md5 or crc32 hit). Exists only because `era` still carries guesses, and will be removed once it stops doing so. |
+| `guess` | set | **Transitional.** Set from a heuristic (extension, directory marker, PE OS version, volume label, XDVDFS root file name, CHD GD-ROM tag, CHD title match, CHD header hash claim, md5 or crc32 hit). Exists only because `era` still carries guesses, and will be removed once it stops doing so. |
 | `ambiguous` | None | The signal narrows to a few eras, listed in `candidates`. |
-| `container_only` | None | Container or filesystem confirmed (`iso9660`, `chd`, `bin_cue`), but no platform. |
+| `container_only` | None | Container or filesystem confirmed (`iso9660`, `xdvdfs`, `chd`, `chd_cd`, `chd_dvd`, `bin_cue`), but no platform. For a CD or DVD CHD the possible eras are in `candidates`. |
 | `unsupported` | None | Recognised but not mapped to an era (`.nds`, an index entry with no era, a path that is neither file nor directory). |
 | `no_signal` | None | Nothing usable found. |
 | `error` | None | The input could not be examined (missing path, read or parse error, the `detect()` catch-all). |
 
-`authoritative` is True only for a sha1 index hit on a non-CHD file's own bytes and a platform-unique magic signature (Dreamcast IP.BIN, N64, iNES). A CHD header `rawsha1` hit is a claim, not proof: the header is forgeable and is not checked against the hunks, so it is `guess`. An md5 hit is corroboration only until the index stores file sizes, so it is `guess` too (crc32 is likewise `guess`). Everything else is not authoritative, including the XDVDFS magic (shared by Xbox 360), PS3_DISC.SFB by name, the CHD CHGD tag (also used by NAOMI GD-ROMs) and SYSTEM.CNF (any readable file without BOOT2 reads as PS1). It is always False when `era` is None.
+`authoritative` is True only for a sha1 index hit on a non-CHD file's own bytes and a platform-unique magic signature (Dreamcast IP.BIN, N64, iNES). A CHD header `rawsha1` hit is a claim, not proof: the header is forgeable and is not checked against the hunks, so it is `guess`. An md5 hit is corroboration only until the index stores file sizes, so it is `guess` too (crc32 is likewise `guess`). A `SYSTEM.CNF` read from an ISO 9660 root with a `BOOT2` key (ps2) or a `BOOT` key (ps1) is authoritative (strict key match: the key must be exactly `BOOT2` or `BOOT`, and a missing, empty or garbage file names no era). Everything else is not authoritative, including XDVDFS (the era comes from a root file name, `DEFAULT.XBE` or `DEFAULT.XEX`, not from the file's contents), PS3_DISC.SFB by name, the CHD GD-ROM tags (also used by NAOMI GD-ROMs), a CHD title match, and `SYSTEM.CNF` read from a raw `.bin` or a directory (their results are `guess` for now). It is always False when `era` is None.
 
 Other fields, all defaulted:
 
-- `method`: the rule that produced the result. One of `hash_sha1`, `hash_md5`, `hash_crc32`, `chd_header_claim` (index hit on the CHD header's embedded `rawsha1`: a claim, not checked against the hunks), `magic`, `structural`, `system_cnf`, `directory_marker`, `pe_header`, `extension`, `size_heuristic`, `none` (no rule produced a signal).
-- `container`: `iso9660`, `xdvdfs`, `chd` or `bin_cue` when confirmed, else None.
+- `method`: the rule that produced the result. One of `hash_sha1`, `hash_md5`, `hash_crc32`, `chd_header_claim` (index hit on the CHD header's embedded `rawsha1`: a claim, not checked against the hunks), `magic`, `structural`, `system_cnf`, `directory_marker`, `pe_header`, `extension`, `size_heuristic`, `title_match` (an exact normalized filename-title match against the index, within a CHD's candidate eras), `none` (no rule produced a signal).
+- `container`: `iso9660`, `xdvdfs`, `bin_cue`, `chd` (no recognised media tag, or an unsupported header version), `chd_cd` (CHT2, CHTR or CHCD tag), `chd_dvd` (DVD tag) or `chd_gd` (CHGD or CHGT tag) when confirmed, else None.
 - `candidates`: `Candidate(era, tier, evidence)` tuples for `ambiguous` results.
 - `evidence`: short stable codes for the specific signals, such as `pvd_volume_label_keyword`.
-- `issues`: `Issue(code, message)` tuples, for example `INDEX_UNAVAILABLE` (the hash tier did not run), `POINTER_REJECTED`, `UNEXPECTED_ERROR`. `warnings` is still filled in as before.
+- `issues`: `Issue(code, message)` tuples, for example `INDEX_UNAVAILABLE` (the hash tier did not run), `POINTER_REJECTED`, `UNEXPECTED_ERROR`, and the `IssueCode` members `CLAIM_UNVERIFIED`, `HASH_WEAK` (era from an md5 or crc32 hit alone), `CONFLICTING_EVIDENCE` (a hash hit named another era than the structure; the structure wins), `WRONG_ERA`, `AMBIGUOUS_CONTAINER` (several candidate eras matched a CHD's title), `UNSUPPORTED_LAYOUT` (a recognised container layout that is not parsed, such as a full XGD image) and `CHD_VERSION_UNSUPPORTED` (only CHD header version 5 is read). `warnings` is still filled in as before.
 - `platform_hint`: a platform the signal points at when `platform` is not set (for example `Nintendo DS` for `.nds`).
 
-`Status`, `Method` and `Tier` are `StrEnum`s, so `scan.status == "guess"` works. Constructing a `ScanResult` with contradictory values (an era-less result marked authoritative, an era with a status other than `identified`/`guess`) raises `ValueError`.
+`Status`, `Method`, `Tier` and `IssueCode` are `StrEnum`s, so `scan.status == "guess"` works. Constructing a `ScanResult` with contradictory values (an era-less result marked authoritative, an era with a status other than `identified`/`guess`) raises `ValueError`.
+
+**CHD resolution.** A CHD's raw bytes cannot be hash-matched, and its tags only say CD, DVD or GD-ROM: `CHT2`/`CHTR`/`CHCD` is a CD (PS1 or PS2), the DVD tag is a DVD (PS2, Xbox or Xbox 360), `CHGD`/`CHGT` is a GD-ROM (Dreamcast, but NAOMI shares it). When the result is `container_only` with `candidates`, `detect()` derives a title from the filename (bracketed tags and a trailing disc suffix removed) and matches it exactly, after normalization, against the hash index titles of the candidate eras only. Exactly one matching era sets that era with method `title_match` (a `guess`, never authoritative); two or more matching eras stay `container_only` with `AMBIGUOUS_CONTAINER`; no match, or an unavailable index, leaves the result unchanged. A file called `Ico (USA).chd` is therefore resolved from the index, never from its size, and a PS2 game is no longer labelled `ps1`.
 
 `Tier` buckets a confidence value; `tier_for_confidence()` is the one mapping. The `confidence` float itself is unchanged.
 
@@ -169,7 +172,7 @@ Other fields, all defaulted:
 | `weak` | above 0.0 to below 0.5 |
 | `none` | 0.0 (or below, or NaN) |
 
-`ClassifyResult` keeps its statuses and existing fields, and adds keyword-only `matched_era` (era of the matched index entry, or the era the title search was scoped to for `mismatch`), `hash_kind` (`sha1`, `chd_rawsha1`, `md5`, `crc32`, or None) and `issues` (`HASH_FAILED`, `INDEX_UNAVAILABLE`, `INDEX_MISSING`, `CHD_RAWSHA1_MISSING`, `CLAIM_UNVERIFIED`). `matched_title` is still set only for `mismatch`. `VerifyResult` gains the status `unchecked` and a keyword-only `issues` (`INDEX_UNAVAILABLE`). See [Hash index](#hash-index) for what `unchecked` means.
+`ClassifyResult` keeps its statuses and existing fields, and adds keyword-only `matched_era` (era of the matched index entry, or for `mismatch` the era of the matched title: the supplied era, unless `WRONG_ERA` says the best title match lies in another era), `hash_kind` (`sha1`, `chd_rawsha1`, `md5`, `crc32`, or None) and `issues` (`HASH_FAILED`, `INDEX_UNAVAILABLE`, `INDEX_MISSING`, `CHD_RAWSHA1_MISSING`, `CLAIM_UNVERIFIED`, `WRONG_ERA`). `matched_title` is still set only for `mismatch`. `VerifyResult` gains the status `unchecked` and a keyword-only `issues` (`INDEX_UNAVAILABLE`). See [Hash index](#hash-index) for what `unchecked` means.
 
 ### Public API
 
@@ -226,7 +229,7 @@ The hash index (`hash_index.json`, cached at `~/.formatscout/`) has confirmed en
 ```
 </details>
 
-**Xbox 360** has an `_ERA_MARKERS` mapping and hash-index entries, but no structural or directory detection path exists for it yet. Outside Tier 1, the only Xbox 360 signal is a `.xex` file suffix, which returns `xbox360` at 0.7 from the extension alone. Xbox 360 disc images are not separated from original Xbox: a disc image with the XDVDFS magic at 0x10000 is reported as era `xbox` whatever its generation, and so is a raw DVD rip over 4 GiB.
+**Xbox and Xbox 360.** An XDVDFS volume with its descriptor at 0x10000 is read directly: a bounded walk of the root directory (4096 entries, depth 256) looks for `DEFAULT.XBE` (era `xbox`) or `DEFAULT.XEX` (era `xbox360`); a root with neither or both is `container_only` with candidates `xbox` and `xbox360`. Other XGD layouts (the descriptor at the XGD1/2/3 game-partition offsets) are recognised but not parsed: `container_only`, the same candidates, issue `UNSUPPORTED_LAYOUT`. An ISO 9660 image over 4 GiB with no other signal has no era (ordinary PC DVDs are that size). A `.xex` file suffix still returns `xbox360` at 0.7 from the extension alone. The XDVDFS directory entry layout and the XGD offsets are unverified against real media.
 
 ## Hash index
 
@@ -280,12 +283,13 @@ DAT files are third-party, untrusted input. `dat_parser.parse_dat()` rejects any
 
 ## Known limitations
 
-- Xbox OG ISOs with no `.xbe` in the root directory fall through to `xbox_image.py`'s byte-offset check. The magic-byte tier doesn't apply here since no `.iso` signature exists. The `.xbe` check only reads an ISO 9660 root directory located through the PVD, and the code never parses XDVDFS directory entries. XDVDFS images (xISO) have no ISO 9660 PVD, so they are identified only by the XDVDFS magic. Whether real Xbox rips carry `DEFAULT.XBE` in an ISO 9660 root is unverified.
+- XDVDFS parsing (the volume descriptor fields, the root directory entry layout, the 2048-byte sector arithmetic and the XGD partition offsets) is written from format knowledge, not checked against real disc images, so treat an Xbox or Xbox 360 era from a disc image as a guess. Whether real Xbox rips carry `DEFAULT.XBE` in an ISO 9660 root is also unverified.
+- Only CHD header version 5 is read. A v3 or v4 CHD, common in older sets, returns no era and no candidates (`CHD_VERSION_UNSUPPORTED`); the CHD tag names (`CHCD`, `CHGT`, the DVD tag) and the `CHT2` text payload are taken from the builders used in the tests, not from real `chdman` output.
 - `.bin`/`.cue` pairs missing their `.cue` sibling return low confidence with a warning.
 - Every entry point takes a local, seekable `Path`. No stream or object-storage handle support.
 - `detect()` never raises for an input path (an `index_path` of the wrong type or an empty string is a programming error and raises `TypeError`/`ValueError`). An unusable index (a failed or suppressed download: network error, timeout, size cap, sha256 mismatch, a recent failure within the 5 minute retry backoff, or `FORMATSCOUT_OFFLINE=1`; an oversized, corrupt or unreadable `hash_index.json`; or no home directory for the default location) does not raise from `detect()`, `classify()` or `verify()`: `detect()` logs a warning, adds a `hash index unavailable: ...; heuristics only` warning and an `INDEX_UNAVAILABLE` issue, and continues without the hash tier, while `classify()` and `verify()` return `status="unchecked"` with an `INDEX_UNAVAILABLE` issue. `strict=True` makes them raise `IndexUnavailable` (an `OSError`, original error chained as `__cause__`) instead. `classify()` also returns `unchecked` with `HASH_FAILED` for an `OSError` while hashing the file. A missing index file at a custom path is still treated as an empty index. `verify()` and `hash_file()` let read errors on the input file propagate.
-- Size thresholds use different units by design. The Xbox DVD-rip/ISO-fallback boundary is binary 4 GiB. The PS1/PS2 boundary in `detect_from_pvd()` is decimal 4.7GB, matching how disc capacities are usually quoted.
-- `requires_extraction` is only set by the Xbox DVD-rip path today. Callers run their own conversion tooling, such as extract-xiso. This package only detects the need.
+- Size thresholds use different units by design. The ISO fallback boundary is binary 4 GiB. The PS1/PS2 candidate ordering in `detect_from_pvd()` uses decimal 4.7GB, matching how disc capacities are usually quoted. Size only orders or proposes candidate eras; it never decides an era.
+- `requires_extraction` is only set when an XDVDFS volume is positively identified at an XGD game-partition offset (never from size). Callers run their own conversion tooling, such as extract-xiso. This package only detects the need.
 - `hash_index.json` is not bundled in the installed distribution. It is downloaded once on first hash lookup (this implicit download is the default in this release), verified against a hardcoded sha256, and cached under `~/.formatscout/` together with a `hash_index.json.meta` sidecar. Only a file with that sidecar is checked against the pin; any other file is yours and only gets the size cap and JSON validity check. That first run requires network access unless you supply an index (`index_path=`, `FORMATSCOUT_INDEX_PATH`) or call `ensure_index()` earlier; with `FORMATSCOUT_OFFLINE=1` no download is attempted. See [Hash index](#hash-index).
 
 ## Backlog
