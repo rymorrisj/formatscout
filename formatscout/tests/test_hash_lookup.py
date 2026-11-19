@@ -210,6 +210,70 @@ class TestLoadIndexMtimeCache:
 
         assert list(hash_lookup._index_cache) == [index_path]
 
+    @pytest.mark.parametrize("change", ["size", "mtime"])
+    def test_not_cached_when_the_index_changes_across_the_load(self, tmp_path: Path, monkeypatch, change: str):
+        """Same rule as the title cache: a file whose mtime or size changed
+        while it was read is used for this call but never cached."""
+        hash_lookup = _hash_lookup_module()
+        index_path = fx.write_synthetic_index(tmp_path)
+        hash_lookup._index_cache.clear()
+        real_json_load = hash_lookup.json.load
+
+        def _load_then_change(fh, *args, **kwargs):
+            loaded = real_json_load(fh, *args, **kwargs)
+            if change == "size":
+                with open(index_path, "a", encoding="utf-8") as handle:
+                    handle.write(" ")
+            else:
+                stat = index_path.stat()
+                os.utime(index_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+            return loaded
+
+        monkeypatch.setattr(hash_lookup.json, "load", _load_then_change)
+
+        index, _md5, _crc32 = hash_lookup.load_index(index_path)
+
+        # The result still comes from the parse in hand, it is just not kept.
+        assert index
+        assert hash_lookup._index_cache == {}
+
+    def test_unstable_load_keeps_the_previous_entry(self, tmp_path: Path, monkeypatch):
+        hash_lookup = _hash_lookup_module()
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        good = fx.write_synthetic_index(tmp_path / "a")
+        moving = fx.write_synthetic_index(tmp_path / "b")
+        hash_lookup._index_cache.clear()
+        hash_lookup.load_index(good)
+        real_json_load = hash_lookup.json.load
+
+        def _load_then_touch(fh, *args, **kwargs):
+            loaded = real_json_load(fh, *args, **kwargs)
+            stat = moving.stat()
+            os.utime(moving, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+            return loaded
+
+        monkeypatch.setattr(hash_lookup.json, "load", _load_then_touch)
+        hash_lookup.load_index(moving)
+
+        assert list(hash_lookup._index_cache) == [good]
+
+    def test_same_mtime_different_size_reparses(self, tmp_path: Path):
+        hash_lookup = _hash_lookup_module()
+        index_path = fx.write_synthetic_index(tmp_path)
+        hash_lookup._index_cache.clear()
+        index1, _, _ = hash_lookup.load_index(index_path)
+
+        stat = index_path.stat()
+        with open(index_path, "a", encoding="utf-8") as handle:
+            handle.write(" ")
+        os.utime(index_path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+        index2, _, _ = hash_lookup.load_index(index_path)
+
+        assert index1 is not index2
+        assert index1 == index2
+
     def test_failed_parse_of_another_path_keeps_the_working_entry(self, tmp_path: Path):
         hash_lookup = _hash_lookup_module()
         (tmp_path / "a").mkdir()

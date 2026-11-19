@@ -98,11 +98,13 @@ _QUARANTINE_SLOTS = 6
 # dropped only then, so a failed or oversized load never costs the entry that
 # still works; the price is that two parsed indexes are alive at once while a
 # replacement parses (peak memory is about twice one parsed index). Keyed by
-# mtime so a rebuilt hash_index.json (via build_index.py) is picked up without
-# a restart. Alternating between two index paths re-parses on every switch; use
-# one path per process for the hot path. Guarded by _index_lock, which is held
-# across the parse so concurrent callers parse a given file once, not per thread.
-_index_cache: dict[Path, tuple[float, dict, dict, dict]] = {}
+# (mtime_ns, size) so a rebuilt hash_index.json (via build_index.py) is picked
+# up without a restart, and stored only when both are unchanged across the
+# load (same rule as the title cache). Alternating between two index paths
+# re-parses on every switch; use one path per process for the hot path. Guarded
+# by _index_lock, which is held across the parse so concurrent callers parse a
+# given file once, not per thread.
+_index_cache: dict[Path, tuple[tuple[int, int], dict, dict, dict]] = {}
 _index_lock = threading.RLock()
 
 
@@ -781,19 +783,22 @@ def _cache_provenance_ok(path: Path, stat: os.stat_result, recorded: tuple[str, 
 
 
 def _parse_index(index_path: Path) -> tuple[dict, dict, dict]:
-    """mtime-cached parse of *index_path* into (sha1, md5, crc32) indices.
-    The cache holds one entry (see _index_cache): a different path or a
-    changed mtime replaces it, but only once the new file has parsed, so a
-    failure leaves the previous entry in place.
+    """(mtime_ns, size)-cached parse of *index_path* into (sha1, md5, crc32)
+    indices. The cache holds one entry (see _index_cache): a different path
+    or a changed mtime or size replaces it, but only once the new file has
+    parsed, so a failure leaves the previous entry in place. When the file's
+    mtime or size changes while it is being read (or it can no longer be
+    stat'ed afterwards), the parsed index is returned but not cached, since
+    it may not match either version of the file.
 
     Refuses files over _MAX_INDEX_BYTES before json.load(). Raises
     IndexIntegrityError for an oversized, non-JSON, or malformed file.
     """
     with _index_lock:
         stat = index_path.stat()
-        mtime = stat.st_mtime
+        signature = (stat.st_mtime_ns, stat.st_size)
         cached = _index_cache.get(index_path)
-        if cached is not None and cached[0] == mtime:
+        if cached is not None and cached[0] == signature:
             return cached[1], cached[2], cached[3]
 
         if stat.st_size > _MAX_INDEX_BYTES:
@@ -821,9 +826,17 @@ def _parse_index(index_path: Path) -> tuple[dict, dict, dict]:
             if crc32 and crc32 not in crc32_index:
                 crc32_index[crc32] = entry
 
-        # Replace only now that the new index is complete and valid.
+        try:
+            after = index_path.stat()
+        except OSError:
+            after = None
+        if after is None or (after.st_mtime_ns, after.st_size) != signature:
+            # Changed (or gone) across the load: use it, keep the old entry.
+            return index, md5_index, crc32_index
+
+        # Replace only now that the new index is complete, valid and stable.
         _index_cache.clear()
-        _index_cache[index_path] = (mtime, index, md5_index, crc32_index)
+        _index_cache[index_path] = (signature, index, md5_index, crc32_index)
         return index, md5_index, crc32_index
 
 
