@@ -63,14 +63,53 @@ class _Title(NamedTuple):
     platform: str | None
 
 
-# The title table of the one index used most recently:
-# (index_path, mtime, {era: [_Title, ...]}), or None. Built for every era in
-# one pass over the index (which hash_lookup.load_index keeps in its own
-# single-entry cache). One entry only, replaced once the new table is
-# complete, never evicted beforehand, so a failed load keeps the working
-# table. Guarded by _title_lock.
-_title_cache: tuple[Path, float, dict[str, list[_Title]]] | None = None
+class _Signature(NamedTuple):
+    """The stat identity of an index file: what the title cache is keyed on."""
+    mtime_ns: int
+    size: int
+
+
+class _TitleCache(NamedTuple):
+    path: Path
+    signature: _Signature  # of the file the tables were built from
+    eras: tuple[str, ...]  # every era in that index, in first-appearance order
+    tables: dict[str, list[_Title]]  # {era: titles}, only for eras built so far
+
+
+# The title tables of the one index used most recently, or None. Tables are
+# built per era, only for the eras a call asks for (one pass over the index,
+# which hash_lookup.load_index keeps in its own single-entry cache), and kept
+# as one entry per era. Memory bound: one index at a time; per era, at most
+# one _Title per distinct title (so at most one per index entry in total),
+# each holding a title of at most 4 * _MAX_TITLE_CHARS characters and two
+# normalized forms of at most _MAX_TITLE_CHARS. Only eras present in the
+# index get an entry, so caller-supplied era names cannot grow the cache.
+# Replaced (never mutated) once the new tables are complete, never evicted
+# beforehand, so a failed load keeps the working tables; stored only when the
+# index's mtime and size were the same before and after load_index().
+# Guarded by _title_lock. clear_title_cache() drops it.
+_title_cache: _TitleCache | None = None
 _title_lock = threading.Lock()
+
+
+def clear_title_cache(path: Path | None = None) -> None:
+    """Drop the cached title tables: those of the index at *path*, or any
+    when *path* is None. Safe for a path that was never loaded. Meant to be
+    called by hash_lookup.forget_index() so forgetting an index also forgets
+    its titles."""
+    global _title_cache
+    with _title_lock:
+        if _title_cache is not None and (path is None or _title_cache.path == path):
+            _title_cache = None
+
+
+def _index_signature(index_path: Path) -> _Signature | None:
+    """(mtime_ns, size) of *index_path*, or None when it cannot be stat'ed."""
+    try:
+        stat = index_path.stat()
+    except OSError:
+        return None
+    return _Signature(stat.st_mtime_ns, stat.st_size)
 
 
 def _normalize_title(title: str) -> str:
@@ -112,11 +151,50 @@ def _numeric_tokens(text: str) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _title_table(index_path: Path) -> dict[str, list[_Title]]:
-    """{era: [_Title, ...]} for every era in the index, cached (see
-    _title_cache). A missing index (FileNotFoundError) is an empty table;
-    other index failures propagate as IndexUnavailable."""
+def _build_tables(
+    index: dict, wanted: frozenset[str] | None,
+) -> tuple[tuple[str, ...], dict[str, list[_Title]]]:
+    """One pass over *index*: every era it holds (first-appearance order) and
+    {era: [_Title, ...]} for the eras in *wanted* (None: all). Each built era
+    present in the index gets an entry, an empty list when none of its titles
+    is usable, so it is not rebuilt later."""
+    all_eras: dict[str, None] = {}
+    tables: dict[str, list[_Title]] = {}
+    seen: dict[str, set[str]] = {}
+    for entry in index.values():
+        entry_era = entry.get("era")
+        if not isinstance(entry_era, str):
+            continue
+        all_eras[entry_era] = None
+        if wanted is not None and entry_era not in wanted:
+            continue
+        era_titles = tables.setdefault(entry_era, [])
+        original = entry.get("title")
+        if not isinstance(original, str) or not original or len(original) > 4 * _MAX_TITLE_CHARS:
+            continue
+        era_seen = seen.setdefault(entry_era, set())
+        if original in era_seen:
+            continue
+        era_seen.add(original)
+        normalized = _normalize_title(original)
+        if not normalized or len(normalized) > _MAX_TITLE_CHARS:
+            continue
+        key = _strip_disc_suffix(normalized)
+        platform = entry.get("platform")
+        era_titles.append(_Title(
+            normalized, original, _numeric_tokens(key), key, platform if isinstance(platform, str) else None,
+        ))
+    return tuple(all_eras), tables
+
+
+def _title_table(index_path: Path, eras: Iterable[str] | None = None) -> dict[str, list[_Title]]:
+    """{era: [_Title, ...]} for the requested *eras* (None: every era in the
+    index) that the index holds, in index first-appearance order. Only eras
+    not already cached are built (see _title_cache). A missing index
+    (FileNotFoundError) is an empty table; other index failures propagate as
+    IndexUnavailable."""
     global _title_cache
+    before = _index_signature(index_path)
     try:
         index, _md5_index, _crc32_index = _hash_lookup.load_index(index_path)
     except FileNotFoundError:
@@ -124,44 +202,36 @@ def _title_table(index_path: Path) -> dict[str, list[_Title]]:
         # degrade-to-empty behavior classify() already applies when
         # load_index fails for the sha1/md5/crc32 tiers.
         return {}
-    try:
-        mtime: float | None = index_path.stat().st_mtime
-    except OSError:
-        # Replaced or removed since load_index() returned: use the index
-        # already in hand, just without caching the title table.
-        mtime = None
+    after = _index_signature(index_path)
+    # Changed (or unreadable) across the load: the index in hand may not be
+    # the file the signature describes, so use it without caching anything.
+    signature = before if before is not None and before == after else None
+
+    wanted = None if eras is None else frozenset(eras)
+    if wanted is not None and not wanted:
+        return {}
 
     with _title_lock:
         cached = _title_cache
-        if mtime is not None and cached is not None and cached[0] == index_path and cached[1] == mtime:
-            return cached[2]
+        if signature is None or cached is None or cached.path != index_path or cached.signature != signature:
+            cached = None
 
-        by_era: dict[str, list[_Title]] = {}
-        seen: dict[str, set[str]] = {}
-        for entry in index.values():
-            entry_era = entry.get("era")
-            original = entry.get("title")
-            if not isinstance(entry_era, str) or not isinstance(original, str) or not original:
-                continue
-            if len(original) > 4 * _MAX_TITLE_CHARS:
-                continue
-            era_seen = seen.setdefault(entry_era, set())
-            if original in era_seen:
-                continue
-            era_seen.add(original)
-            normalized = _normalize_title(original)
-            if not normalized or len(normalized) > _MAX_TITLE_CHARS:
-                continue
-            key = _strip_disc_suffix(normalized)
-            platform = entry.get("platform")
-            by_era.setdefault(entry_era, []).append(_Title(
-                normalized, original, _numeric_tokens(key), key, platform if isinstance(platform, str) else None,
-            ))
+        if cached is None:
+            all_eras, tables = _build_tables(index, wanted)
+            if signature is not None:
+                _title_cache = _TitleCache(index_path, signature, all_eras, tables)
+        else:
+            all_eras = cached.eras
+            requested = all_eras if wanted is None else [era for era in all_eras if era in wanted]
+            missing = frozenset(era for era in requested if era not in cached.tables)
+            tables = cached.tables
+            if missing:
+                _all_eras, built = _build_tables(index, missing)
+                # A new dict, so a table already handed out is never mutated.
+                tables = {**cached.tables, **built}
+                _title_cache = cached._replace(tables=tables)
 
-        # Replace only now that the whole table has been built.
-        if mtime is not None:
-            _title_cache = (index_path, mtime, by_era)
-        return by_era
+    return {era: tables[era] for era in all_eras if era in tables and (wanted is None or era in wanted)}
 
 
 def fuzzy_title_match(
@@ -183,8 +253,10 @@ def fuzzy_title_match(
     their value, so "7" equals "VII" but "2" never equals "3"; a trailing
     disc number is ignored), then pass SequenceMatcher.real_quick_ratio() and
     quick_ratio() before the full ratio() is computed. Cost is one pass over
-    the table with O(1)/O(len) prefilters per title; ratio() runs only for
-    candidates whose upper bounds reach the current cut-off.
+    the titles of the searched eras with O(1)/O(len) prefilters per title;
+    ratio() runs only for candidates whose upper bounds reach the current
+    cut-off. Only the searched eras' title tables are built and cached (see
+    _title_cache), so eras=[...] never builds the other eras.
 
     Signature change from the era-scoped version: the positional *era*
     parameter is gone (use eras=[...] to restrict), *index_path* is now
@@ -205,11 +277,10 @@ def fuzzy_title_match(
 
     if index_path is None:
         index_path = resolve_index_path()
-    table = _title_table(index_path)
+    table = _title_table(index_path, eras)
     if not table:
         return []
 
-    wanted = None if eras is None else frozenset(eras)
     numbers = _numeric_tokens(_strip_disc_suffix(query))
     matcher = SequenceMatcher(None, "", query)
     # Min-heap of (score, arrival, TitleMatch); a new candidate replaces the
@@ -217,8 +288,6 @@ def fuzzy_title_match(
     heap: list[tuple[float, int, TitleMatch]] = []
     arrival = 0
     for era, titles in table.items():
-        if wanted is not None and era not in wanted:
-            continue
         for entry in titles:
             if entry.numbers != numbers:
                 continue
@@ -249,7 +318,8 @@ def exact_title_matches(
     Fails closed (empty list) for an empty title, one longer than
     MAX_QUERY_CHARS after normalization (never truncated, so a cut cannot
     create a match), or an index with no titles. Cost is one equality scan
-    over the titles of the requested eras. index_path resolution and index
+    over the titles of the requested eras; only their title tables are built
+    and cached (see _title_cache). index_path resolution and index
     failures are as in fuzzy_title_match().
     """
     if not isinstance(title, str) or not title or len(title) > _MAX_RAW_CHARS:
@@ -258,11 +328,12 @@ def exact_title_matches(
     if not key or len(key) > MAX_QUERY_CHARS:
         return []
 
+    requested = tuple(dict.fromkeys(eras))  # once: *eras* may be a one-shot iterator
     if index_path is None:
         index_path = resolve_index_path()
-    table = _title_table(index_path)
+    table = _title_table(index_path, requested)
     out: list[ExactTitleMatch] = []
-    for era in dict.fromkeys(eras):
+    for era in requested:
         for entry in table.get(era, ()):
             if entry.key == key:
                 out.append(ExactTitleMatch(era, entry.original, entry.platform))

@@ -227,6 +227,54 @@ class TestCrossEraTitleMatch:
         assert (result.status, result.matched_era, result.matched_title) == ("mismatch", "ps2", "Same Game (Europe)")
         assert result.issues == ()
 
+    def test_exact_supplied_era_match_survives_five_other_era_variants(self, tmp_path: Path, monkeypatch):
+        from formatscout.hashing.title_match import fuzzy_title_match
+        regions = ("USA", "Europe", "Japan", "Korea", "Asia")
+        index_path = _title_index(
+            tmp_path, [(f"Same Game ({region})", "ps1") for region in regions] + [("Same Game (Brazil)", "ps2")],
+        )
+        fx.patch_classify_index(monkeypatch, index_path)
+        # Premise: a single cross-era top-5 is filled by the earlier ps1 ties.
+        assert {m.era for m in fuzzy_title_match("Same Game", index_path=index_path, limit=5)} == {"ps1"}
+
+        result = _classify(_unindexed_file(tmp_path), title="Same Game", era="ps2")
+
+        assert (result.status, result.matched_era, result.matched_title) == ("mismatch", "ps2", "Same Game (Brazil)")
+        assert result.similarity == 1.0
+        assert result.issues == ()
+
+    def test_supplied_era_match_above_threshold_wins_over_a_better_other_era(self, tmp_path: Path, monkeypatch):
+        # ratio("same game", "same gamer") == 18/19 ~ 0.947, above 0.80 but below ps1's 1.0.
+        fx.patch_classify_index(
+            monkeypatch, _title_index(tmp_path, [("Same Game (USA)", "ps1"), ("Same Gamer (USA)", "ps2")]),
+        )
+
+        result = _classify(_unindexed_file(tmp_path), title="Same Game", era="ps2")
+
+        assert (result.status, result.matched_era, result.matched_title) == ("mismatch", "ps2", "Same Gamer (USA)")
+        assert result.similarity is not None and 0.80 <= result.similarity < 1.0
+        assert result.issues == ()
+
+    def test_wrong_era_only_when_supplied_era_is_below_threshold(self, tmp_path: Path, monkeypatch):
+        # ratio("same game", "same game collection") == 18/29 ~ 0.62, below 0.80.
+        fx.patch_classify_index(
+            monkeypatch, _title_index(tmp_path, [("Same Game (USA)", "ps1"), ("Same Game Collection (USA)", "ps2")]),
+        )
+
+        result = _classify(_unindexed_file(tmp_path), title="Same Game", era="ps2")
+
+        assert (result.status, result.matched_era, result.matched_title) == ("mismatch", "ps1", "Same Game (USA)")
+        assert [issue.code for issue in result.issues] == ["WRONG_ERA"]
+
+    def test_no_wrong_era_when_no_era_matches(self, tmp_path: Path, monkeypatch):
+        fx.patch_classify_index(
+            monkeypatch, _title_index(tmp_path, [("Other Thing (USA)", "ps1"), ("Same Game Collection (USA)", "ps2")]),
+        )
+
+        result = _classify(_unindexed_file(tmp_path), title="Same Game", era="ps2")
+
+        assert (result.status, result.matched_era, result.issues) == ("not_in_index", None, ())
+
     def test_sequel_number_must_be_equal(self, tmp_path: Path, monkeypatch):
         # ratio("tekken 2", "tekken 3") == 0.875 would clear 0.80 without the numeric rule.
         fx.patch_classify_index(monkeypatch, _title_index(tmp_path, [("Tekken 2 (USA)", "ps1")]))

@@ -1,11 +1,13 @@
 """Tests for formatscout.hashing.title_match: cross-era fuzzy matching, the
-numeric-token rule, the query cap, exact matching and the single-entry cache."""
+numeric-token rule, the query cap, exact matching, the single-index per-era
+cache and its invalidation."""
 
+import os
 from pathlib import Path
 
 import pytest
 
-from formatscout.hashing import title_match
+from formatscout.hashing import hash_lookup, title_match
 from formatscout.hashing.title_match import TitleMatch, exact_title_matches, fuzzy_title_match
 from formatscout.tests import smart_media_fixtures as fx
 from formatscout.tests.builders import index as index_builder
@@ -128,18 +130,126 @@ class TestTitleCache:
         second = _index(tmp_path, [("Second Game (USA)", "ps2", None)], name="second.json")
 
         fuzzy_title_match("First Game", index_path=first)
-        assert title_match._title_cache is not None and title_match._title_cache[0] == first
+        assert title_match._title_cache is not None and title_match._title_cache.path == first
         fuzzy_title_match("Second Game", index_path=second)
 
-        assert title_match._title_cache[0] == second
-        assert set(title_match._title_cache[2]) == {"ps2"}
+        assert title_match._title_cache.path == second
+        assert set(title_match._title_cache.tables) == {"ps2"}
 
     def test_cached_table_is_reused_for_the_same_index(self, tmp_path: Path, monkeypatch):
         monkeypatch.setattr(title_match, "_title_cache", None)
         path = _index(tmp_path, [("Cached Game (USA)", "ps1", None)])
 
         fuzzy_title_match("Cached Game", index_path=path)
-        table = title_match._title_cache[2]
+        table = title_match._title_cache.tables["ps1"]
         exact_title_matches("Cached Game", ["ps1"], index_path=path)
 
-        assert title_match._title_cache[2] is table
+        assert title_match._title_cache.tables["ps1"] is table
+
+    @pytest.mark.parametrize("change", ["size", "mtime"])
+    def test_not_cached_when_the_index_changes_across_the_load(self, tmp_path: Path, monkeypatch, change: str):
+        monkeypatch.setattr(title_match, "_title_cache", None)
+        path = _index(tmp_path, [("Racing Game (USA)", "ps1", None)])
+        real_load = title_match._hash_lookup.load_index
+
+        def _load_then_change(index_path, **kwargs):
+            loaded = real_load(index_path, **kwargs)
+            if change == "size":
+                with open(index_path, "a", encoding="utf-8") as handle:
+                    handle.write(" ")
+            else:
+                stat = index_path.stat()
+                os.utime(index_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+            return loaded
+
+        monkeypatch.setattr(title_match._hash_lookup, "load_index", _load_then_change)
+
+        matches = fuzzy_title_match("Racing Game", index_path=path)
+
+        # The result still comes from the index in hand, it is just not kept.
+        assert [m.title for m in matches] == ["Racing Game (USA)"]
+        assert title_match._title_cache is None
+
+    def test_a_cached_entry_is_not_reused_after_the_file_changes(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(title_match, "_title_cache", None)
+        path = _index(tmp_path, [("Old Game (USA)", "ps1", None)])
+        fuzzy_title_match("Old Game", index_path=path)
+        old_signature = title_match._title_cache.signature
+
+        _index(tmp_path, [("New Game Deluxe (USA)", "ps1", None)])
+        # Move mtime on explicitly: hash_lookup's own parse cache is keyed on
+        # mtime, and a coarse filesystem clock could leave it unchanged.
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+
+        assert [m.title for m in fuzzy_title_match("New Game Deluxe", index_path=path)] == ["New Game Deluxe (USA)"]
+        assert title_match._title_cache.signature != old_signature
+
+
+class TestPerEraTables:
+    def test_only_the_requested_eras_are_built(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(title_match, "_title_cache", None)
+        path = _index(tmp_path, [("Ico (USA)", "ps2", None), ("Ico (Japan)", "ps1", None), ("Ico", "xbox", None)])
+
+        exact_title_matches("Ico", ["ps1"], index_path=path)
+
+        cache = title_match._title_cache
+        assert set(cache.tables) == {"ps1"}
+        assert cache.eras == ("ps2", "ps1", "xbox")
+
+    def test_one_entry_per_era_added_without_rebuilding_the_others(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(title_match, "_title_cache", None)
+        path = _index(tmp_path, [("Ico (USA)", "ps2", None), ("Ico (Japan)", "ps1", None), ("Ico", "xbox", None)])
+
+        fuzzy_title_match("Ico", index_path=path, eras=["ps1"])
+        ps1_table = title_match._title_cache.tables["ps1"]
+        fuzzy_title_match("Ico", index_path=path, eras=["ps2"])
+
+        assert set(title_match._title_cache.tables) == {"ps1", "ps2"}
+        assert title_match._title_cache.tables["ps1"] is ps1_table
+
+    def test_eras_absent_from_the_index_add_no_entry(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(title_match, "_title_cache", None)
+        path = _index(tmp_path, [("Ico (USA)", "ps2", None)])
+
+        assert exact_title_matches("Ico", ["nes", "snes"], index_path=path) == []
+        assert set(title_match._title_cache.tables) == set()
+
+    def test_no_eras_restriction_builds_every_era(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(title_match, "_title_cache", None)
+        path = _index(tmp_path, [("Ico (USA)", "ps2", None), ("Ico (Japan)", "ps1", None)])
+
+        fuzzy_title_match("Ico", index_path=path)
+
+        assert set(title_match._title_cache.tables) == {"ps1", "ps2"}
+
+
+class TestClearTitleCache:
+    def test_clear_for_a_path_drops_only_that_index(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(title_match, "_title_cache", None)
+        path = _index(tmp_path, [("Ico (USA)", "ps2", None)])
+        fuzzy_title_match("Ico", index_path=path)
+
+        title_match.clear_title_cache(tmp_path / "other.json")
+        assert title_match._title_cache is not None
+        title_match.clear_title_cache(path)
+        assert title_match._title_cache is None
+        title_match.clear_title_cache(path)  # twice, and for an unloaded path, is fine
+
+    def test_clear_without_a_path_drops_everything(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(title_match, "_title_cache", None)
+        fuzzy_title_match("Ico", index_path=_index(tmp_path, [("Ico (USA)", "ps2", None)]))
+
+        title_match.clear_title_cache()
+
+        assert title_match._title_cache is None
+
+    def test_forget_index_also_clears_the_title_cache(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(title_match, "_title_cache", None)
+        path = _index(tmp_path, [("Ico (USA)", "ps2", None)])
+        fuzzy_title_match("Ico", index_path=path)
+        assert title_match._title_cache is not None
+
+        hash_lookup.forget_index(path)
+
+        assert title_match._title_cache is None

@@ -13,8 +13,8 @@ from .validators.chd_validator import extract_embedded_sha1
 # suite points it at a tmp path; leave it None in application code.
 _INDEX_PATH: Path | None = None
 _DEFAULT_THRESHOLD = 0.80
-# How many cross-era title candidates classify() asks for (ties at the top
-# score are resolved in favour of the supplied era among these).
+# How many title candidates classify() asks for per search (the supplied era
+# is searched separately, so this never limits whether its match is found).
 _TITLE_CANDIDATES = 5
 
 
@@ -38,12 +38,15 @@ def classify(
     missing index file at a custom path (FileNotFoundError) is neither: it is
     treated as an empty index, with an INDEX_MISSING issue.
 
-    Title fallback (no hash matched): the title is matched across every era
-    in the index (fuzzy_title_match()), not only *era*. When the best match
-    (ties at the top score go to *era*) is in *era*, the result is the same
-    "mismatch" as before, with matched_era=era. When it lies in another era,
-    the status is still "mismatch" but matched_title/similarity describe that
-    out-of-era title, matched_era is its era, and a WRONG_ERA issue is added.
+    Title fallback (no hash matched): the best title match inside *era* is
+    computed on its own (fuzzy_title_match(eras=[era])), separately from the
+    cross-era search, so other-era candidates can never push it out. When
+    *era* has a match at or above *threshold*, the result is "mismatch" with
+    that title and matched_era=era, even if another era scores the same or
+    higher (ties and near-ties favour the supplied era). Only when *era* has
+    no such match is every other era searched; if one matches, the status is
+    still "mismatch" but matched_title/similarity describe that out-of-era
+    title, matched_era is its era, and a WRONG_ERA issue is added.
     era=None (or empty) still skips the title fallback entirely (fail closed).
     Numeric tokens must agree for any title match (see fuzzy_title_match()),
     so sequels that differ only by a number no longer produce "mismatch".
@@ -129,14 +132,19 @@ def classify(
     match: TitleMatch | None = None
     if era:
         try:
-            matches = fuzzy_title_match(
+            # The supplied era is searched on its own, so candidates from
+            # other eras can never crowd an in-era match out of a top-k.
+            in_era = fuzzy_title_match(
+                title, index_path=resolved_index, eras=(era,), threshold=threshold, limit=_TITLE_CANDIDATES,
+            )
+            other = [] if in_era else fuzzy_title_match(
                 title, index_path=resolved_index, threshold=threshold, limit=_TITLE_CANDIDATES,
             )
         except IndexUnavailable as exc:
             if strict:
                 raise
             return _index_unchecked(path, computed_sha1, exc)
-        match = _best_title_match(matches, era)
+        match = in_era[0] if in_era else _best_other_era_match(other, era)
     if match is not None and match.era == era:
         return ClassifyResult(
             status="mismatch", computed_sha1=computed_sha1, matched_title=match.title, similarity=match.score,
@@ -179,18 +187,11 @@ def _index_unchecked(path: Path, computed_sha1: str, exc: IndexUnavailable) -> C
     )
 
 
-def _best_title_match(matches: list[TitleMatch], era: str) -> TitleMatch | None:
-    """The best of *matches* (sorted best first), preferring *era* among the
-    candidates tied at the top score. None when there are no matches."""
-    if not matches:
-        return None
-    top = matches[0].score
-    for candidate in matches:
-        if candidate.score < top:
-            break
-        if candidate.era == era:
-            return candidate
-    return matches[0]
+def _best_other_era_match(matches: list[TitleMatch], era: str) -> TitleMatch | None:
+    """The best of *matches* (sorted best first) outside *era*, or None. Only
+    consulted once *era* itself has no match at or above the threshold; the
+    filter guards against the index changing between the two searches."""
+    return next((candidate for candidate in matches if candidate.era != era), None)
 
 
 def _entry_era(entry: object) -> str | None:

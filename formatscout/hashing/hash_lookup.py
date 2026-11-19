@@ -660,7 +660,8 @@ def _move_no_overwrite(src: Path, dst: Path) -> None:
 
 def forget_index(path: Path) -> None:
     """Drop everything cached in this process about the index at *path*: the
-    parsed index and the once-per-file-version provenance verdicts. The next
+    parsed index, the title tables built from it and the once-per-file-version
+    provenance verdicts. The next
     load re-parses and re-checks. Documented internal API (used by index.py)."""
     with _index_lock:
         _index_cache.pop(path, None)
@@ -668,6 +669,11 @@ def forget_index(path: Path) -> None:
     # meanwhile cannot raise "dictionary changed size during iteration".
     for key in [k for k in list(_verified_default) if k[0] == path]:
         _verified_default.pop(key, None)
+    # Lazy import: title_match imports this module at the top, so a top-level
+    # import here would be circular.
+    from . import title_match as _title_match
+
+    _title_match.clear_title_cache(path)
 
 
 def _is_pristine_download(path: Path) -> bool:
