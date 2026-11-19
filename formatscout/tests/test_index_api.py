@@ -493,8 +493,10 @@ class TestEnsureIndexUserSuppliedPath:
         custom = fx.write_synthetic_index(tmp_path)
         hash_lookup.load_index(custom)  # a real use populates the cache
         before = custom.stat()
-        custom.write_text("{ now broken", encoding="utf-8")
-        os.utime(custom, ns=(before.st_atime_ns, before.st_mtime_ns))  # same mtime: the parse cache still hits
+        # The parse cache signature is mtime plus size; pad with spaces so both stay equal.
+        broken = "{ now broken".ljust(before.st_size)
+        custom.write_text(broken, encoding="utf-8")
+        os.utime(custom, ns=(before.st_atime_ns, before.st_mtime_ns))  # same mtime and size: the parse cache still hits
 
         assert ensure_index(custom) == custom
         assert custom in hash_lookup._index_cache  # a plain ensure_index leaves the cache alone
@@ -506,7 +508,7 @@ class TestEnsureIndexUserSuppliedPath:
             hash_lookup.load_index(custom)  # the broken file now surfaces at first use
 
         assert env.opener.calls == 0
-        assert custom.read_text(encoding="utf-8") == "{ now broken"
+        assert custom.read_text(encoding="utf-8") == broken
 
 
 class TestEnsureIndexForce:
