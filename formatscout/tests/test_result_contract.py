@@ -456,7 +456,8 @@ class TestIsoSites:
         path = write_sparse(tmp_path / "g.iso", fx.build_pvd_iso(volume_id="SLUS_200.62"), 4_800_000_000)
         result = iso_detect.detect_from_pvd(path)
         assert result.era is None
-        _tags(result, Method.SIZE_HEURISTIC, Status.AMBIGUOUS, False)
+        # Size only orders the candidates; the method is structural at every size.
+        _tags(result, Method.STRUCTURAL, Status.AMBIGUOUS, False)
         assert [c.era for c in result.candidates] == ["ps2", "ps1"]
 
     def test_pvd_no_signal(self, tmp_path: Path):

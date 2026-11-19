@@ -12,6 +12,7 @@ from .constants import (
 from .iso9660_dir import DirRecord, iter_dir_records
 from .utils.pointer_file import read_capped_lines
 from .utils.safe_path import rejection_warning, resolve_pointer
+from .utils.text import one_line
 from .xbox_image import has_iso9660_magic, probe_xbox_image
 from .magic.magic_detect import SYSTEM_CNF_READ_CAP_BYTES, classify_system_cnf, detect_from_magic, magic_tags
 from .result import (
@@ -39,6 +40,18 @@ _PS_SERIAL_PREFIXES = ("SLUS", "SCES", "SCUS", "SLPS", "SCPS", "SLES", "SLEJ")
 # ECMA-119 8.4: a Primary Volume Descriptor is type code 1 followed by the
 # standard identifier "CD001".
 _PVD_STANDARD_ID = b"CD001"
+
+# Longest PVD text field (volume label, publisher, preparer) quoted in a
+# reason. The raw fields are up to 128 bytes of untrusted image content.
+_LABEL_DISPLAY_CAP_CHARS = 64
+
+
+def _display_label(text: str) -> str:
+    """*text* (a raw PVD text field) made safe to quote in a reason: control
+    characters (newlines, ESC, ...) become spaces, runs of whitespace
+    collapse, and the result is capped at _LABEL_DISPLAY_CAP_CHARS characters
+    (ending in "..." when cut). Matching still uses the raw field."""
+    return one_line(text, limit=_LABEL_DISPLAY_CAP_CHARS)
 
 
 def detect_iso(path: Path) -> ScanResult:
@@ -215,8 +228,10 @@ def _detect_cue(
 # CHD contract below. It reads nothing itself, it only inspects the
 # validator's ScanResult:
 #   - result.container already "chd_cd" / "chd_dvd" / "chd_gd", or
-#   - one of the tag evidence codes below in result.evidence
-#     ("chd_meta_chtr_cht2" is the code the validator emits today), and
+#   - one of the tag evidence codes below in result.evidence (the
+#     validator's _tag_result() emits "chd_meta_" plus the lower-cased tag:
+#     chd_meta_cht2, chd_meta_chtr, chd_meta_chcd, chd_meta_chgd,
+#     chd_meta_chgt, chd_meta_dvd), and
 #   - an Issue with code IssueCode.CHD_VERSION_UNSUPPORTED for a non-v5
 #     header.
 #
@@ -233,13 +248,12 @@ def _detect_cue(
 _CHD_TAG_EVIDENCE: dict[str, frozenset[str]] = {
     "chd_gd": frozenset({"chd_meta_chgd", "chd_meta_chgt"}),
     "chd_dvd": frozenset({"chd_meta_dvd"}),
-    "chd_cd": frozenset({"chd_meta_chtr_cht2", "chd_meta_chtr", "chd_meta_cht2", "chd_meta_chcd"}),
+    "chd_cd": frozenset({"chd_meta_chtr", "chd_meta_cht2", "chd_meta_chcd"}),
 }
 _CHD_CANDIDATE_ERAS: dict[str, tuple[str, ...]] = {
     "chd_cd": ("ps1", "ps2"),
     "chd_dvd": ("ps2", "xbox", "xbox360"),
 }
-_CHD_SIZE_EVIDENCE = "chd_logical_size"
 
 
 def detect_chd(path: Path) -> ScanResult:
@@ -274,10 +288,7 @@ def _reconcile_chd_result(result: ScanResult) -> ScanResult:
         )
 
     container = _chd_media_container(result)
-    evidence = tuple(code for code in result.evidence if code != _CHD_SIZE_EVIDENCE)
-    # Warnings written for a size-based era guess no longer apply once the
-    # era is dropped; an era-less validator result keeps its own warnings.
-    carried_warnings = list(result.warnings) if result.era is None else []
+    evidence = result.evidence
 
     if container == "chd_gd":
         was_dreamcast = result.era == "dreamcast"
@@ -287,7 +298,7 @@ def _reconcile_chd_result(result: ScanResult) -> ScanResult:
             title=None, platform=None, era="dreamcast",
             confidence=result.confidence if was_dreamcast else 0.85,
             reason=result.reason if was_dreamcast else "CHD metadata GD-ROM track tag (CHGD/CHGT) indicates Dreamcast",
-            warnings=list(result.warnings) if was_dreamcast else carried_warnings,
+            warnings=list(result.warnings),
             # Not authoritative: Sega NAOMI GD-ROM images carry the same tag.
             status=Status.GUESS, method=Method.STRUCTURAL, authoritative=False, container=container,
             evidence=evidence, issues=result.issues,
@@ -304,20 +315,12 @@ def _reconcile_chd_result(result: ScanResult) -> ScanResult:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.3,
             reason=f"CHD metadata {media} track tag confirms a {media} image but names no platform",
-            warnings=carried_warnings or [f"CHD {media} image, could be {', '.join(eras)}, select the era manually"],
+            warnings=list(result.warnings) or [f"CHD {media} image, could be {', '.join(eras)}, select the era manually"],
             status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container=container,
             evidence=evidence, issues=result.issues,
             candidates=tuple(Candidate(era, tier_for_confidence(0.3), evidence) for era in eras),
         )
 
-    if result.era is not None and result.method is Method.SIZE_HEURISTIC:
-        # No recognised tag but an era from size: never allowed for a CHD.
-        return ScanResult(
-            title=None, platform=None, era=None, confidence=0.0,
-            reason="CHD container detected; logical size names no platform",
-            status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container=result.container or "chd",
-            evidence=evidence, issues=result.issues,
-        )
     return result
 
 
@@ -402,7 +405,7 @@ def detect_from_pvd(iso_path: Path) -> ScanResult:
             if any(k in vol_id for k in kw):
                 return ScanResult(
                     title=None, platform=None, era=era, confidence=0.75,
-                    reason=f"ISO volume label contains '{vol_id}'",
+                    reason=f"ISO volume label contains '{_display_label(vol_id)}'",
                     method=Method.STRUCTURAL, authoritative=False, evidence=("pvd_volume_label_keyword",),
                 )
 
@@ -421,7 +424,7 @@ def detect_from_pvd(iso_path: Path) -> ScanResult:
                 matched = next(p for p in _DOS_PUBLISHERS if p in meta)
                 return ScanResult(
                     title=None, platform=None, era="dos", confidence=0.7,
-                    reason=f"ISO {label} '{meta[:40]}' matches known DOS publisher '{matched}'",
+                    reason=f"ISO {label} '{_display_label(meta)}' matches known DOS publisher '{matched}'",
                     method=Method.STRUCTURAL, authoritative=False, evidence=(f"pvd_{label}_dos_publisher",),
                 )
 
@@ -480,8 +483,11 @@ def _ps_ambiguous_result(iso_path: Path, vol_id: str, publisher: str, evidence: 
     candidates ps1 and ps2.
 
     The file size only orders the candidates (a file past the 4.7 GB DVD-5
-    boundary puts ps2 first, at a higher tier); it never names an era. A
-    stat failure leaves the default order.
+    boundary puts ps2 first, at a higher tier); it never names an era and
+    never changes the method, which is Method.STRUCTURAL at every size (the
+    PVD fields are what narrowed the answer), so an md5 hit is reconciled
+    with this result the same way whatever the file size. A stat failure
+    leaves the default order.
     """
     try:
         over_dvd5 = iso_path.stat().st_size > DVD5_SIZE_THRESHOLD_BYTES
@@ -489,22 +495,20 @@ def _ps_ambiguous_result(iso_path: Path, vol_id: str, publisher: str, evidence: 
         over_dvd5 = False
     if over_dvd5:
         evidence += ("size_over_dvd5",)
-        method = Method.SIZE_HEURISTIC
         candidates = (
             Candidate("ps2", tier_for_confidence(0.5), evidence),
             Candidate("ps1", tier_for_confidence(0.2), evidence),
         )
     else:
-        method = Method.STRUCTURAL
         candidates = tuple(Candidate(ps, tier_for_confidence(0.4), evidence) for ps in ("ps1", "ps2"))
     return ScanResult(
         title=None, platform=None, era=None, confidence=0.4,
         reason=(
-            f"ISO volume label '{vol_id}', publisher '{publisher[:30]}' suggest PlayStation, "
-            "but no SYSTEM.CNF BOOT/BOOT2 key could be read to tell PS1 from PS2"
+            f"ISO volume label '{_display_label(vol_id)}', publisher '{_display_label(publisher)}' "
+            "suggest PlayStation, but no SYSTEM.CNF BOOT/BOOT2 key could be read to tell PS1 from PS2"
         ),
         warnings=["PlayStation disc without a readable SYSTEM.CNF BOOT/BOOT2 key, select PS1 or PS2 manually"],
-        status=Status.AMBIGUOUS, method=method, container="iso9660",
+        status=Status.AMBIGUOUS, method=Method.STRUCTURAL, container="iso9660",
         evidence=evidence, candidates=candidates,
     )
 

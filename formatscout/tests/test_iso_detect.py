@@ -303,9 +303,78 @@ class TestDetectFromPvd:
         result = self._call(iso_path)
         assert result.era is None
         assert result.status == Status.AMBIGUOUS
-        assert result.method == Method.SIZE_HEURISTIC
+        assert result.method == Method.STRUCTURAL
         assert [(c.era, c.tier) for c in result.candidates] == [("ps2", Tier.MODERATE), ("ps1", Tier.WEAK)]
         assert "size_over_dvd5" in result.evidence
+
+    @pytest.mark.parametrize("size", [None, 4_800_000_000])
+    def test_ps_ambiguous_method_is_structural_at_every_size(self, tmp_path: Path, size):
+        """The size orders the candidates but never changes the method or
+        the candidate set. size None keeps the small fixture as written; the
+        large size is a sparse truncate, nothing is written."""
+        from formatscout.result import Method, Status
+
+        iso_path = fx.write_pvd_iso(tmp_path / "game.iso", volume_id="SLUS_123.45")
+        if size is not None:
+            with iso_path.open("r+b") as fh:
+                fh.truncate(size)
+        result = self._call(iso_path)
+        assert result.status == Status.AMBIGUOUS
+        assert result.method == Method.STRUCTURAL
+        assert {c.era for c in result.candidates} == {"ps1", "ps2"}
+
+    @pytest.mark.parametrize("size", [None, 4_800_000_000])
+    def test_md5_hit_reconciles_the_same_at_every_size(self, tmp_path: Path, size):
+        """An md5 hit for ps2 picks ps2 among the ambiguous candidates at a
+        CD-sized and a DVD-sized file alike. Calls the reconciler directly
+        with the real detect_from_pvd() result so the sparse multi-GB file is
+        never hashed."""
+        from formatscout import detector
+        from formatscout.result import IssueCode, Method, ScanResult, Status
+
+        iso_path = fx.write_pvd_iso(tmp_path / "game.iso", volume_id="SLUS_123.45")
+        if size is not None:
+            with iso_path.open("r+b") as fh:
+                fh.truncate(size)
+        hit = ScanResult(
+            title="Some Game (USA)", platform="Sony - PlayStation 2", era="ps2", confidence=0.85,
+            reason="md5 match: fake", method=Method.HASH_MD5,
+        )
+        result = detector._reconcile_weak_hash(hit, self._call(iso_path))
+        assert result.era == "ps2"
+        assert (result.method, result.status, result.authoritative) == (Method.HASH_MD5, Status.GUESS, False)
+        assert result.container == "iso9660"
+        assert result.confidence == 0.85
+        assert "md5_index_match" in result.evidence
+        assert IssueCode.HASH_WEAK not in [issue.code for issue in result.issues]
+
+    def test_volume_label_control_characters_never_reach_the_reason(self, tmp_path: Path):
+        iso_path = fx.write_pvd_iso(tmp_path / "game.iso", volume_id="MSDOS\x1b[2J\r\nEVIL\x07")
+        result = self._call(iso_path)
+        assert result.era == "dos"
+        assert not any(not ch.isprintable() for ch in result.reason)
+        assert "MSDOS" in result.reason and "EVIL" in result.reason
+
+    def test_over_length_publisher_is_capped_in_the_reason(self, tmp_path: Path):
+        from formatscout.iso_detect import _LABEL_DISPLAY_CAP_CHARS
+
+        publisher = "SIERRA " + "X" * 120
+        iso_path = fx.write_pvd_iso(tmp_path / "game.iso", publisher=publisher)
+        result = self._call(iso_path)
+        assert result.era == "dos"
+        quoted = result.reason.split("'")[1]
+        assert len(quoted) == _LABEL_DISPLAY_CAP_CHARS
+        assert quoted.endswith("...")
+        assert "X" * 100 not in result.reason
+
+    def test_ps_ambiguous_reason_sanitizes_label_and_publisher(self, tmp_path: Path):
+        iso_path = fx.write_pvd_iso(
+            tmp_path / "game.iso", volume_id="SLUS_123.45\n\x1b", publisher="SONY\t" + "Z" * 120,
+        )
+        result = self._call(iso_path)
+        assert result.era is None
+        assert not any(not ch.isprintable() for ch in result.reason)
+        assert "Z" * 100 not in result.reason
 
     def test_sony_publisher_with_cdrom_system_id_is_ambiguous_regardless_of_size(self, tmp_path: Path):
         """sys_id == 'CD-ROM' + 'SONY' in publisher is a PlayStation hint even
@@ -975,23 +1044,16 @@ class TestDetectChdContract:
         path.write_bytes(b"\x00")
         return detect_chd(path)
 
-    @pytest.mark.parametrize("logical_size_era", ["ps1", "ps2"])
-    def test_current_cd_size_guess_becomes_chd_cd_candidates(self, tmp_path: Path, monkeypatch, logical_size_era):
-        """The validator's CHTR/CHT2 logical-size era guess is dropped."""
-        from formatscout.result import Method, Status
+    def test_tag_evidence_codes_are_the_ones_the_validator_emits(self):
+        """Every tag evidence code the mapping recognises is "chd_meta_" plus
+        a lower-cased tag the validator walks for (no stale combined code)."""
+        from formatscout import iso_detect
+        from formatscout.validators import chd_validator
 
-        _fake_chd(monkeypatch, _chd_scan(
-            era=logical_size_era, confidence=0.3, warnings=["not authoritative: size heuristic"],
-            method=Method.SIZE_HEURISTIC, container="chd", evidence=("chd_meta_chtr_cht2", "chd_logical_size"),
-        ))
-        result = self._call(tmp_path)
-        assert result.era is None
-        assert result.status == Status.CONTAINER_ONLY
-        assert result.method == Method.STRUCTURAL
-        assert result.container == "chd_cd"
-        assert [c.era for c in result.candidates] == ["ps1", "ps2"]
-        assert "chd_logical_size" not in result.evidence
-        assert not any("size heuristic" in w for w in result.warnings)
+        tags = chd_validator._CD_TAGS | chd_validator._GD_TAGS | {chd_validator._META_DVD}
+        emitted = {f"chd_meta_{tag.decode('ascii').strip().lower()}" for tag in tags}
+        recognised = set().union(*iso_detect._CHD_TAG_EVIDENCE.values())
+        assert recognised == emitted
 
     @pytest.mark.parametrize(
         "evidence, container, eras",
@@ -1060,15 +1122,31 @@ class TestDetectChdContract:
         _fake_chd(monkeypatch, already)
         assert self._call(tmp_path) is already
 
-    def test_size_era_without_a_tag_is_dropped(self, tmp_path: Path, monkeypatch):
-        from formatscout.result import Method
+    def test_tagless_container_only_result_is_passed_through(self, tmp_path: Path, monkeypatch):
+        """The validator's "no recognised tag" shape (container "chd", era
+        None) is not rewritten."""
+        from formatscout.result import Method, Status
 
-        _fake_chd(monkeypatch, _chd_scan(
-            era="ps2", confidence=0.3, method=Method.SIZE_HEURISTIC, container="chd", evidence=("chd_logical_size",),
-        ))
-        result = self._call(tmp_path)
+        already = _chd_scan(
+            status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container="chd",
+            evidence=("chd_magic", "chd_v5"), warnings=["no CHT2/CHTR/CHCD/CHGD/CHGT/DVD tag in metadata chain"],
+        )
+        _fake_chd(monkeypatch, already)
+        assert self._call(tmp_path) is already
+
+    @pytest.mark.parametrize("logical_bytes", [0, 4_400_000_000])
+    def test_real_tagless_chd_end_to_end_has_no_size_era(self, tmp_path: Path, logical_bytes: int):
+        from formatscout.iso_detect import detect_chd
+        from formatscout.result import Status
+        from formatscout.tests.builders import chd
+
+        path = tmp_path / "game.chd"
+        path.write_bytes(chd.build_chd(version=5, logical_bytes=logical_bytes).data)
+        result = detect_chd(path)
         assert result.era is None
+        assert result.status == Status.CONTAINER_ONLY
         assert result.container == "chd"
+        assert "chd_logical_size" not in result.evidence
 
     @pytest.mark.parametrize("logical_bytes", [0, 664_710_336, 4_400_000_000])
     def test_real_cht2_chd_end_to_end_has_no_size_era(self, tmp_path: Path, logical_bytes: int):
@@ -1094,6 +1172,25 @@ class TestDetectChdContract:
         assert result.era == "dreamcast"
         assert result.authoritative is False
         assert result.container == "chd_gd"
+
+
+class TestDisplayLabel:
+    def test_control_characters_become_spaces_and_collapse(self):
+        from formatscout.iso_detect import _display_label
+
+        assert _display_label("SLUS\x1b[2J\r\n_123\x00\x07") == "SLUS [2J _123"
+
+    def test_over_length_input_is_capped(self):
+        from formatscout.iso_detect import _LABEL_DISPLAY_CAP_CHARS, _display_label
+
+        out = _display_label("A" * 200)
+        assert len(out) == _LABEL_DISPLAY_CAP_CHARS == 64
+        assert out.endswith("...")
+
+    def test_short_printable_input_is_unchanged(self):
+        from formatscout.iso_detect import _display_label
+
+        assert _display_label("SONY COMPUTER ENTERTAINMENT") == "SONY COMPUTER ENTERTAINMENT"
 
 
 class TestDetectChd:
