@@ -275,8 +275,9 @@ def _chd_media_container(result: ScanResult) -> str | None:
 
 def _reconcile_chd_result(result: ScanResult) -> ScanResult:
     """Apply the CHD contract above to a validator result. Results that
-    already follow it, and results it does not cover (no CHD magic, read
-    errors, no recognised tag), are returned unchanged."""
+    already follow it, and era-less results it does not cover (no CHD magic,
+    read errors, no recognised tag), are returned unchanged. A result with an
+    era but no recognised tag loses the era (container_only)."""
     version_unsupported = any(issue.code == IssueCode.CHD_VERSION_UNSUPPORTED for issue in result.issues)
     if version_unsupported:
         if result.era is None:
@@ -321,6 +322,16 @@ def _reconcile_chd_result(result: ScanResult) -> ScanResult:
             candidates=tuple(Candidate(era, tier_for_confidence(0.3), evidence) for era in eras),
         )
 
+    if result.era is not None:
+        # No recognised tag, so nothing here may name an era: whatever the
+        # validator (or a replacement for it) based one on, such as the
+        # logical size, is dropped.
+        return ScanResult(
+            title=None, platform=None, era=None, confidence=0.0,
+            reason="CHD container detected but no recognised platform metadata tag found",
+            warnings=list(result.warnings), status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL,
+            container=result.container or "chd", evidence=result.evidence, issues=result.issues,
+        )
     return result
 
 
@@ -433,7 +444,9 @@ def detect_from_pvd(iso_path: Path) -> ScanResult:
     except Exception as exc:
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.0,
-            reason=f"ISO PVD read error: {exc}",
+            # Class name only: the message can quote a path or other
+            # caller-controlled text.
+            reason=f"ISO PVD read error: {type(exc).__name__}",
             status=Status.ERROR, method=Method.NONE,
         )
 

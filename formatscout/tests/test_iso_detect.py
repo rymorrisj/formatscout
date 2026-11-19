@@ -457,7 +457,26 @@ class TestDetectFromPvd:
         ghost = tmp_path / "does_not_exist.iso"
         result = self._call(ghost)
         assert result.era is None
-        assert "ISO PVD read error" in result.reason
+        assert result.reason == "ISO PVD read error: FileNotFoundError"
+
+    def test_read_error_reason_names_the_exception_class_only(self, tmp_path: Path, monkeypatch):
+        """Raw exception text (paths, control characters) is never quoted."""
+        iso_path = tmp_path / "game.iso"
+        iso_path.write_bytes(b"\x00" * 40000)
+
+        real_open = Path.open
+
+        def _boom(self, *args, **kwargs):
+            if self == iso_path:
+                raise PermissionError(13, "denied\r\n\x1b[2J", "C:\\secret\\path.iso")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", _boom)
+        result = self._call(iso_path)
+
+        assert result.reason == "ISO PVD read error: PermissionError"
+        assert "secret" not in result.reason
+        assert "\x1b" not in result.reason
 
 
 # ---------------------------------------------------------------------------
@@ -1134,6 +1153,41 @@ class TestDetectChdContract:
         _fake_chd(monkeypatch, already)
         assert self._call(tmp_path) is already
 
+    @pytest.mark.parametrize("container", ["chd", None])
+    @pytest.mark.parametrize(
+        "era, logical_bytes", [("ps1", 664_710_336), ("ps2", 4_400_000_000), ("xbox", 7_800_000_000)],
+    )
+    def test_bypassed_validator_size_era_is_dropped_by_the_fallback(
+        self, tmp_path: Path, monkeypatch, era: str, logical_bytes: int, container,
+    ):
+        """A validator replaced by one that names an era from the logical
+        size (no tag evidence) reaches _reconcile_chd_result's fallback,
+        which must not pass that era through, neither from detect_chd() nor
+        from detect()."""
+        from formatscout import detector
+        from formatscout.result import Method, Status
+
+        _fake_chd(monkeypatch, _chd_scan(
+            era=era, confidence=0.6, method=Method.SIZE_HEURISTIC, container=container,
+            reason=f"CHD logical size {logical_bytes} bytes suggests {era}",
+            evidence=("chd_magic", "chd_v5", "chd_logical_size"),
+        ))
+
+        result = self._call(tmp_path)
+        assert result.era is None
+        assert result.status == Status.CONTAINER_ONLY
+        assert result.method == Method.STRUCTURAL
+        assert result.authoritative is False
+        assert result.confidence == 0.0
+        assert result.container == "chd"
+        assert result.candidates == ()
+        assert str(logical_bytes) not in result.reason
+
+        fx.patch_detector_index(monkeypatch, tmp_path / "no_such_index.json")
+        through_detect = detector.detect(tmp_path / "game.chd")
+        assert through_detect.era is None
+        assert through_detect.status == Status.CONTAINER_ONLY
+
     @pytest.mark.parametrize("logical_bytes", [0, 4_400_000_000])
     def test_real_tagless_chd_end_to_end_has_no_size_era(self, tmp_path: Path, logical_bytes: int):
         from formatscout.iso_detect import detect_chd
@@ -1199,7 +1253,11 @@ class TestDetectChd:
         from formatscout.result import ScanResult
         from formatscout.validators import chd_validator
 
-        sentinel = ScanResult(title=None, platform=None, era="dreamcast", confidence=1.0, reason="sentinel")
+        # Already contract-shaped (GD tag container), so it is passed through
+        # as is; a tagless era-bearing result would lose its era instead.
+        sentinel = ScanResult(
+            title=None, platform=None, era="dreamcast", confidence=1.0, reason="sentinel", container="chd_gd",
+        )
         captured = {}
 
         def _fake_detect(path):

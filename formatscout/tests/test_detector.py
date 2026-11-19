@@ -768,20 +768,25 @@ _CLAIM_RAWSHA1 = bytes(range(1, 21))
 _CLAIM_TITLE = "Claimed Game (USA)"
 
 
-def _claim_chd(tmp_path: Path, monkeypatch, claimed_era: str, metadata=()) -> Path:
-    """A real v5 CHD whose header rawsha1 is the only key of a one-entry
-    index naming *claimed_era*, with *metadata* as its metadata chain."""
+def _claim_chd(
+    tmp_path: Path, monkeypatch, claimed_era: str, metadata=(), *, name: str = "game.chd", titles=(),
+) -> Path:
+    """A real v5 CHD named *name* whose header rawsha1 is a key of an index
+    naming *claimed_era*, with *metadata* as its metadata chain. *titles*
+    ((title, era, platform) tuples) adds further, unrelated index entries."""
     from formatscout.tests.builders import chd
     from formatscout.tests.builders import index as index_builder
 
     index_dir = tmp_path / "claim_idx"
     index_dir.mkdir()
-    index_path = index_builder.write_index_v1(
-        index_dir / "index.json",
-        [index_builder.IndexEntry(_CLAIM_RAWSHA1.hex(), _CLAIM_TITLE, claimed_era, "Synthetic Platform")],
-    )
+    entries = [index_builder.IndexEntry(_CLAIM_RAWSHA1.hex(), _CLAIM_TITLE, claimed_era, "Synthetic Platform")]
+    entries += [
+        index_builder.IndexEntry(f"{n:040x}", title, era, platform)
+        for n, (title, era, platform) in enumerate(titles, start=1)
+    ]
+    index_path = index_builder.write_index_v1(index_dir / "index.json", entries)
     fx.patch_detector_index(monkeypatch, index_path)
-    path = tmp_path / "game.chd"
+    path = tmp_path / name
     path.write_bytes(chd.build_chd(version=5, metadata=tuple(metadata), rawsha1=_CLAIM_RAWSHA1).data)
     return path
 
@@ -820,17 +825,47 @@ class TestChdHeaderClaim:
         assert calls == [path]
 
     def test_claim_agreeing_with_gd_tag_records_corroboration(self, tmp_path: Path, monkeypatch):
-        from formatscout.result import Method, Status
+        """The claim's own 1.0 never lifts the GD tag's 0.85 guess."""
+        from formatscout.result import IssueCode, Method, Status
 
         result = _detect(_claim_chd(tmp_path, monkeypatch, "dreamcast", [_gd_tag()]))
 
         assert result.era == "dreamcast"
         assert (result.method, result.status, result.authoritative) == (Method.STRUCTURAL, Status.GUESS, False)
+        assert result.confidence == 0.85
         assert result.container == "chd_gd"
         assert "chd_rawsha1_index_match" in result.evidence
         assert result.title == _CLAIM_TITLE
         assert "corroborated by sha1 match (CHD embedded rawsha1)" in result.reason
-        assert result.issues == ()
+        assert _codes(result) == [IssueCode.CLAIM_UNVERIFIED]
+
+    @pytest.mark.parametrize(
+        "tag, claimed_era",
+        [(_cd_tag, "ps1"), (_dvd_tag, "xbox"), (_gd_tag, "dreamcast")],
+        ids=["cd", "dvd", "gd"],
+    )
+    def test_agreeing_claim_keeps_the_tag_only_confidence_and_status(
+        self, tmp_path: Path, monkeypatch, tag, claimed_era: str,
+    ):
+        """Same file with and without its claim in the index: the claim adds
+        evidence and CLAIM_UNVERIFIED, never confidence, status or authority."""
+        from formatscout.iso_detect import detect_chd
+        from formatscout.result import IssueCode
+
+        path = _claim_chd(tmp_path, monkeypatch, claimed_era, [tag()])
+        tag_only = detect_chd(path)
+
+        result = _detect(path)
+
+        assert result.confidence == tag_only.confidence
+        assert result.confidence < 1.0
+        assert (result.status, result.method, result.era) == (tag_only.status, tag_only.method, tag_only.era)
+        assert result.authoritative is False
+        assert result.container == tag_only.container
+        assert [c.era for c in result.candidates] == [c.era for c in tag_only.candidates]
+        assert "chd_rawsha1_index_match" in result.evidence
+        assert IssueCode.CLAIM_UNVERIFIED in _codes(result)
+        assert IssueCode.CONFLICTING_EVIDENCE not in _codes(result)
 
     def test_claim_disagreeing_with_gd_tag_loses_with_conflicting_evidence(self, tmp_path: Path, monkeypatch):
         from formatscout.result import IssueCode, Method
@@ -848,21 +883,56 @@ class TestChdHeaderClaim:
         "tag, claimed_era, container",
         [(_cd_tag, "ps2", "chd_cd"), (_cd_tag, "ps1", "chd_cd"), (_dvd_tag, "xbox", "chd_dvd")],
     )
-    def test_claim_inside_tag_candidates_picks_one(
+    def test_claim_inside_tag_candidates_sets_no_era(
         self, tmp_path: Path, monkeypatch, tag, claimed_era: str, container: str,
     ):
+        """A claim naming one of the candidates is recorded, but the result
+        stays the tag's container_only (no era, tag-only confidence)."""
         from formatscout.result import IssueCode, Method, Status
 
         result = _detect(_claim_chd(tmp_path, monkeypatch, claimed_era, [tag()]))
 
-        assert result.era == claimed_era
+        assert result.era is None
         assert (result.method, result.status, result.authoritative) == (
-            Method.CHD_HEADER_CLAIM, Status.GUESS, False,
+            Method.STRUCTURAL, Status.CONTAINER_ONLY, False,
         )
         assert result.container == container
+        assert claimed_era in [c.era for c in result.candidates]
+        assert result.title is None
         assert "chd_rawsha1_index_match" in result.evidence
         assert IssueCode.CLAIM_UNVERIFIED in _codes(result)
         assert IssueCode.CONFLICTING_EVIDENCE not in _codes(result)
+        assert any(claimed_era in w for w in result.warnings)
+
+    @pytest.mark.parametrize(
+        "claimed_era, extra_code",
+        [("ps1", "CLAIM_UNVERIFIED"), ("dreamcast", "CONFLICTING_EVIDENCE")],
+        ids=["claim-inside-candidates", "claim-against-tag"],
+    )
+    def test_forged_claim_does_not_block_a_single_era_title_match(
+        self, tmp_path: Path, monkeypatch, claimed_era: str, extra_code: str,
+    ):
+        """Regression: a header claim in the index used to skip the
+        filename-title step. A forged claim (another candidate era, or an era
+        the tag rules out) plus a filename that title-matches exactly one
+        candidate era resolves via TITLE_MATCH, not via the claim."""
+        from formatscout.constants import TITLE_MATCH_CONFIDENCE
+        from formatscout.result import Method, Status
+
+        path = _claim_chd(
+            tmp_path, monkeypatch, claimed_era, [_cd_tag()],
+            name="Ico (USA).chd", titles=[("Ico (USA)", "ps2", "Sony - PlayStation 2")],
+        )
+
+        result = _detect(path)
+
+        assert result.era == "ps2"
+        assert (result.method, result.status, result.authoritative) == (Method.TITLE_MATCH, Status.GUESS, False)
+        assert result.confidence == TITLE_MATCH_CONFIDENCE
+        assert result.title == "Ico (USA)"
+        assert result.container == "chd_cd"
+        assert "filename_title_exact_match" in result.evidence
+        assert extra_code in _codes(result)
 
     @pytest.mark.parametrize("tag, container", [(_cd_tag, "chd_cd"), (_dvd_tag, "chd_dvd")])
     def test_claim_outside_tag_candidates_keeps_the_container_result(

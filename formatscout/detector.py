@@ -60,7 +60,9 @@ def _compute_requires_install(path: Path, era: str | None) -> bool:
 # dispatch runs as well (detect_chd() for a .chd) and the two are reconciled
 # in _reconcile_weak_hash(). Only these methods count as structural evidence
 # that can corroborate or overrule the hit; extension-only and size-threshold
-# results are not evidence about the file's content.
+# results are not evidence about the file's content. A CHD claim is
+# corroboration only: it never raises the tag result's confidence or status,
+# and the filename-title step still runs on whatever is left container_only.
 
 _WEAK_HASH_METHODS = frozenset({Method.HASH_MD5, Method.HASH_CRC32, Method.CHD_HEADER_CLAIM})
 _STRUCTURAL_METHODS = frozenset({
@@ -116,15 +118,20 @@ def _reconcile_weak_hash(hit: ScanResult, other: ScanResult | None) -> ScanResul
 
     * Structural evidence with the same era: the structural result is kept
       (method, status, authoritative, container, requires_extraction) and
-      gains the index title/platform, the hit's confidence if higher, and a
-      "<kind>_index_match" evidence code.
+      gains the index title/platform and a "<kind>_index_match" evidence
+      code. An md5/crc32 hit also lifts the confidence to its own if higher;
+      a CHD claim never does (the CHGD/CHGT guess keeps its tag-only
+      confidence) and adds CLAIM_UNVERIFIED.
     * Structural evidence with a different era: the structural result wins
       unchanged apart from a CONFLICTING_EVIDENCE issue and warning.
-    * Structural candidates (era None) that include the hit's era: the hit
-      picks among them and keeps its confidence (guess, not authoritative),
-      taking the structural container (chd_cd/chd_dvd for a CHD); a CHD
-      claim also gets CLAIM_UNVERIFIED. Candidates that exclude it: the
-      structural result wins, with CONFLICTING_EVIDENCE.
+    * Structural candidates (era None) that include the hit's era: an
+      md5/crc32 hit picks among them and keeps its confidence (guess, not
+      authoritative), taking the structural container. A CHD claim does not
+      pick: the tag result (container_only, chd_cd/chd_dvd, tag-only
+      confidence, candidates) is kept with a "<kind>_index_match" evidence
+      code and CLAIM_UNVERIFIED, so detect() still runs the filename-title
+      step on it. Candidates that exclude the hit's era: the structural
+      result wins, with CONFLICTING_EVIDENCE.
     * No structural era evidence: the hit is returned as a weak guess at
       reduced confidence with HASH_WEAK (CLAIM_UNVERIFIED for a CHD claim),
       and the dispatch result's container (None when the dispatch raised).
@@ -143,7 +150,12 @@ def _reconcile_weak_hash(hit: ScanResult, other: ScanResult | None) -> ScanResul
                     other.title = hit.title
                 if other.platform is None:
                     other.platform = hit.platform
-                other.confidence = max(other.confidence, hit.confidence)
+                if is_claim:
+                    other.issues += (_claim_issue(
+                        "CHD header rawsha1 claim agrees with the tag but was not checked against the image data",
+                    ),)
+                else:
+                    other.confidence = max(other.confidence, hit.confidence)
                 other.reason = f"{other.reason}; corroborated by {hit.reason}"
                 other.evidence += (match_code,)
                 return other
@@ -154,15 +166,21 @@ def _reconcile_weak_hash(hit: ScanResult, other: ScanResult | None) -> ScanResul
         if other.candidates:
             candidate_eras = [c.era for c in other.candidates]
             if hit.era in candidate_eras:
+                if is_claim:
+                    message = _one_line(
+                        f"CHD header rawsha1 claim names {hit.era!r}, one of the candidates, "
+                        "but was not checked against the image data; era left unset",
+                        limit=200,
+                    )
+                    other.issues += (_claim_issue(message),)
+                    other.warnings.append(message)
+                    other.evidence += (match_code,)
+                    return other
                 hit.reason = f"{hit.reason}; one of the {other.method} candidates {'/'.join(candidate_eras)}"
                 hit.container = other.container
                 hit.evidence = other.evidence + (match_code,)
                 hit.warnings = list(other.warnings) + hit.warnings
                 hit.issues = other.issues + hit.issues
-                if is_claim:
-                    hit.issues += (_claim_issue(
-                        "era picked by the CHD header rawsha1 claim, which was not checked against the image data",
-                    ),)
                 return hit
             issue, message = _conflict_issue(hit, other, "structural result")
             other.issues += (issue,)
@@ -199,9 +217,11 @@ def _reconcile_weak_hash(hit: ScanResult, other: ScanResult | None) -> ScanResul
 # A CHD's raw bytes cannot be hash-matched and its CD/DVD metadata tag does not
 # name a platform, so detect_chd() returns container_only with candidate eras.
 # An exact normalized match of the filename stem against the index titles of
-# exactly one candidate era picks that era, as a guess, at
-# constants.TITLE_MATCH_CONFIDENCE: the filename alone, so it scores below the
-# era-bearing results read from the file's own bytes.
+# exactly one candidate era picks that era, as a non-authoritative guess, at
+# constants.TITLE_MATCH_CONFIDENCE (0.40, the filename alone). It runs after
+# any CHD header claim has been reconciled, so a claim (forgeable) never
+# switches it off: a claim inside the candidates or against them leaves the
+# result container_only and the title step still decides.
 
 
 def _wants_title_resolution(path: Path, result: ScanResult) -> bool:
@@ -344,8 +364,6 @@ def _detect(
         result = _reconcile_weak_hash(weak_hit, _structural_for_weak_hit(path, dir_cache))
     elif path.is_file():
         result = _detect_file(path, dir_cache)
-        if resolved_index is not None and _wants_title_resolution(path, result):
-            result = _resolve_container_by_title(path, result, resolved_index)
     elif path.is_dir():
         result = detect_directory(path)
     else:
@@ -354,6 +372,12 @@ def _detect(
             reason="path is neither a file nor a directory",
             status=Status.UNSUPPORTED, method=Method.NONE,
         )
+
+    # After the claim reconcile, never instead of it: a CHD still container_only
+    # with candidates (no claim, or a claim that did not set an era) gets the
+    # filename-title step. resolved_index is only set for files.
+    if resolved_index is not None and _wants_title_resolution(path, result):
+        result = _resolve_container_by_title(path, result, resolved_index)
 
     result.requires_install = _compute_requires_install(path, result.era)
     if index_warning is not None and index_warning not in result.warnings:
