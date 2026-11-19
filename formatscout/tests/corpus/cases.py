@@ -29,30 +29,6 @@ from formatscout.tests.builders.iso9660 import build_iso
 from formatscout.tests.builders.sparse import write_sparse
 
 FINDINGS: dict[str, str] = {
-    "F-PS2-SIZE": (
-        "An ISO whose volume label looks like a PlayStation serial is called ps1 unless it is over "
-        "4.7 GB, even when SYSTEM.CNF names BOOT2 (a CD-sized PS2 image)."
-    ),
-    "F-ISO-SYSCNF-UNREAD": (
-        "detect_iso never reads SYSTEM.CNF from a cooked ISO, so a PS1 or PS2 disc whose volume "
-        "label is not serial-shaped gets no era (raw .bin and directories do read it)."
-    ),
-    "F-X360-XDVDFS": (
-        "The XDVDFS magic at 0x10000 always means era xbox; an image whose root holds DEFAULT.XEX "
-        "(Xbox 360) is not told apart from DEFAULT.XBE (original Xbox)."
-    ),
-    "F-DVD-RIP-XBOX": (
-        "Any ISO 9660 image over 4 GiB with no other signal is reported as an Xbox DVD rip "
-        "(requires_extraction), including ordinary PC DVDs."
-    ),
-    "F-CHD-SIZE-GUESS": (
-        "A CHTR/CHT2 CHD is called ps1 or ps2 from its declared logical size alone (ps1 when the "
-        "size is zero). The tag cannot tell PS1 from PS2 (or anything else on CD/DVD)."
-    ),
-    "F-CHD-CHGT": "The old GD-ROM track tag CHGT is not recognised as Dreamcast.",
-    "F-CHD-V4-LAYOUT": (
-        "A v4 CHD header is read with the v5 field offsets, so its metadata chain is never found."
-    ),
     "F-IMG-SIZE-ONLY": (
         "Any .img under 800 MiB is called dos from extension and size alone, including a raw "
         "CloneCD-style PS1 image and a zero-byte file."
@@ -250,24 +226,31 @@ def _hand_written() -> list[Case]:
         ),
         Case(
             "ps1_cooked_iso_boot_serial_label", file_of(ps_cooked(PS1_CNF, "SLUS_000.01")), "ps1.iso", "ps1",
-            expect_method=Method.STRUCTURAL, expect_authoritative=False,
+            expect_method=Method.SYSTEM_CNF, expect_authoritative=True,
         ),
         Case(
             "ps1_cooked_iso_boot_titled_label", file_of(ps_cooked(PS1_CNF, "FSTITLE")), "ps1.iso", "ps1",
-            ("F-ISO-SYSCNF-UNREAD",), True,
+            expect_method=Method.SYSTEM_CNF, expect_authoritative=True,
         ),
         Case(
             "ps2_cooked_iso_boot2_serial_label", file_of(ps_cooked(PS2_CNF, "SLUS_200.62")), "ps2.iso", "ps2",
-            ("F-PS2-SIZE",), True,
+            expect_method=Method.SYSTEM_CNF, expect_authoritative=True,
         ),
         Case(
             "ps2_cooked_iso_boot2_titled_label", file_of(ps_cooked(PS2_CNF, "FSTITLE")), "ps2.iso", "ps2",
-            ("F-ISO-SYSCNF-UNREAD",), True,
+            expect_method=Method.SYSTEM_CNF, expect_authoritative=True,
         ),
         Case(
             "ps2_dvd_sized_iso_boot2_serial_label",
             sparse_of(ps_cooked(PS2_CNF, "SLUS_200.62"), 4_800_000_000), "ps2_dvd.iso", "ps2",
-            expect_method=Method.SIZE_HEURISTIC, expect_authoritative=False,
+            expect_method=Method.SYSTEM_CNF, expect_authoritative=True,
+        ),
+        # A PlayStation-looking disc with no readable BOOT/BOOT2 key names no era.
+        Case(
+            "iso_system_cnf_without_boot_key_no_era", file_of(ps_cooked("VER = 1.00\r\n", "FSTITLE")), "nokey.iso", None,
+        ),
+        Case(
+            "iso_serial_label_without_system_cnf_no_era", file_of(plain_iso(volume_id="SLUS_000.01")), "serial.iso", None,
         ),
         Case("clonecd_img_ps1_raw", clonecd_img(ps1_bin), "game.img", "ps1", ("F-IMG-SIZE-ONLY",), True),
         # -- PS3 ---------------------------------------------------------------
@@ -291,7 +274,7 @@ def _hand_written() -> list[Case]:
         ),
         Case(
             "xdvdfs_xex_iso", file_of(xdvdfs_image("DEFAULT.XEX").data), "x360.iso", "xbox360",
-            ("F-X360-XDVDFS",), True,
+            expect_method=Method.MAGIC, expect_authoritative=False,
         ),
         Case(
             "xex2_file_ext", file_of(roms.build_xex2()), "default.xex", "xbox360",
@@ -304,7 +287,6 @@ def _hand_written() -> list[Case]:
         # -- Generic ISO 9660 ---------------------------------------------------
         Case(
             "pc_dvd_iso9660_over_4gib", sparse_of(plain_iso(volume_id="FSPCDVD"), 4_400_000_000), "pc_dvd.iso", None,
-            ("F-DVD-RIP-XBOX",), True,
         ),
         Case(
             "pc_cd_iso9660_no_signal", file_of(plain_iso(volume_id="FSDATA")), "data.iso", None,
@@ -335,7 +317,8 @@ def _hand_written() -> list[Case]:
         ),
         Case(
             "chd_v5_chgt_dreamcast", file_of(chd_image(5, chd.track_entry(chd.TAG_CHGT, track_type="MODE1_RAW")).data), "dc.chd",
-            "dreamcast", ("F-CHD-CHGT",), True,
+            "dreamcast",
+            expect_method=Method.STRUCTURAL, expect_authoritative=False,
         ),
         Case(
             "chd_v5_chain_unknown_tag_then_chgd",
@@ -345,17 +328,17 @@ def _hand_written() -> list[Case]:
         Case(
             "chd_v5_cht2_ico_cd_sized_ps2",
             file_of(chd_image(5, chd.track_entry(chd.TAG_CHT2), logical_bytes=ICO_LOGICAL_BYTES).data), "Ico (USA).chd", None,
-            ("F-CHD-SIZE-GUESS",), True,
+            expect_method=Method.STRUCTURAL, expect_authoritative=False,
         ),
         Case(
             "chd_v5_chtr_dvd_sized",
             file_of(chd_image(5, chd.track_entry(chd.TAG_CHTR), logical_bytes=DVD_LOGICAL_BYTES).data), "disc.chd", None,
-            ("F-CHD-SIZE-GUESS",), True,
+            expect_method=Method.STRUCTURAL, expect_authoritative=False,
         ),
         Case(
             "chd_v5_cht2_logical_size_zero",
             file_of(chd_image(5, chd.track_entry(chd.TAG_CHT2), logical_bytes=0).data), "disc.chd", None,
-            ("F-CHD-SIZE-GUESS",), True,
+            expect_method=Method.STRUCTURAL, expect_authoritative=False,
         ),
         Case(
             "chd_v5_dvd_tag", file_of(chd_image(5, chd.dvd_entry(), logical_bytes=DVD_LOGICAL_BYTES).data), "dvd.chd", None,
@@ -367,7 +350,7 @@ def _hand_written() -> list[Case]:
         ),
         Case(
             "chd_v4_chgd_dreamcast", file_of(chd_image(4, chd.track_entry(chd.TAG_CHGD, track_type="MODE1_RAW")).data), "dc_v4.chd",
-            "dreamcast", ("F-CHD-V4-LAYOUT",), True,
+            None, expect_method=Method.STRUCTURAL, expect_authoritative=False,
         ),
         Case(
             "chd_v4_cht2", file_of(chd_image(4, chd.track_entry(chd.TAG_CHT2), logical_bytes=ICO_LOGICAL_BYTES).data), "disc_v4.chd", None,
@@ -375,6 +358,49 @@ def _hand_written() -> list[Case]:
         ),
         Case(
             "chd_v4_dvd_tag", file_of(chd_image(4, chd.dvd_entry(), logical_bytes=DVD_LOGICAL_BYTES).data), "dvd_v4.chd", None,
+            expect_method=Method.STRUCTURAL, expect_authoritative=False,
+        ),
+        Case(
+            "chd_v5_chcd_tag", file_of(chd_image(5, chd.MetaEntry(chd.TAG_CHCD, b"\x00")).data), "chcd.chd", None,
+            expect_method=Method.STRUCTURAL, expect_authoritative=False,
+        ),
+        Case(
+            "chd_v5_chtr_plain_cd", file_of(chd_image(5, chd.track_entry(chd.TAG_CHTR)).data), "cd.chd", None,
+            expect_method=Method.STRUCTURAL, expect_authoritative=False,
+        ),
+        Case(
+            "chd_v5_unknown_tag_then_cht2",
+            file_of(chd_image(5, chd.MetaEntry(b"ABCD", b"x\x00"), chd.track_entry(chd.TAG_CHT2)).data), "disc.chd", None,
+            expect_method=Method.STRUCTURAL, expect_authoritative=False,
+        ),
+        # CD/DVD CHDs are resolved by an exact filename-title match in the candidate eras only.
+        Case(
+            "chd_cht2_title_match_single_era_ps2",
+            file_of(chd_image(5, chd.track_entry(chd.TAG_CHT2), logical_bytes=ICO_LOGICAL_BYTES).data), "Ico (USA).chd", "ps2",
+            index=lambda d: index.write_index_v1(
+                d / "index.json",
+                [index.entry_for(b"ico-ps2", title="Ico (USA)", era="ps2", platform="Sony - PlayStation 2")],
+            ),
+            expect_method=Method.TITLE_MATCH, expect_authoritative=False,
+        ),
+        Case(
+            "chd_cht2_title_match_two_eras_stays_ambiguous",
+            file_of(chd_image(5, chd.track_entry(chd.TAG_CHT2)).data), "Twin (USA).chd", None,
+            index=lambda d: index.write_index_v1(
+                d / "index.json",
+                [
+                    index.entry_for(b"twin-ps1", title="Twin (USA)", era="ps1", platform="Sony - PlayStation"),
+                    index.entry_for(b"twin-ps2", title="Twin (USA)", era="ps2", platform="Sony - PlayStation 2"),
+                ],
+            ),
+            expect_method=Method.STRUCTURAL, expect_authoritative=False,
+        ),
+        Case(
+            "chd_cht2_title_match_outside_candidates_ignored",
+            file_of(chd_image(5, chd.track_entry(chd.TAG_CHT2)).data), "Halo (USA).chd", None,
+            index=lambda d: index.write_index_v1(
+                d / "index.json", [index.entry_for(b"halo-xbox", title="Halo (USA)", era="xbox", platform="Microsoft - Xbox")],
+            ),
             expect_method=Method.STRUCTURAL, expect_authoritative=False,
         ),
         # -- Executables ---------------------------------------------------------
@@ -457,6 +483,7 @@ def _hand_written() -> list[Case]:
             "dir_system_cnf_boot", dir_of({"SYSTEM.CNF": PS1_CNF.encode("ascii")}), "ps1_dir", "ps1",
             expect_method=Method.SYSTEM_CNF, expect_authoritative=False,
         ),
+        Case("dir_system_cnf_without_boot_key_no_era", dir_of({"SYSTEM.CNF": b"VER = 1.00\r\n"}), "nokey_dir", None),
         Case(
             "dir_windows_xp_installer", dir_of({"XPSP": b""}), "xp_dir", "winxp",
             expect_method=Method.DIRECTORY_MARKER, expect_authoritative=False,
@@ -606,7 +633,7 @@ def _truncated_cases() -> list[Case]:
 
     xbe = xdvdfs_image("DEFAULT.XBE")
     cases += _truncations(
-        "xdvdfs_xbe_iso", ".iso", xbe.data, xbe.boundaries() + [xbe.signal_end - 1], era="xbox", intact_from=xbe.signal_end,
+        "xdvdfs_xbe_iso", ".iso", xbe.data, xbe.boundaries() + [xbe.signal_end - 1], era="xbox", intact_from=xbe.structure_end,
         method=Method.MAGIC, authoritative=False,
     )
 
