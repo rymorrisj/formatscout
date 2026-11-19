@@ -191,6 +191,7 @@ def build_synthetic_chd(embedded_sha1_hex: str) -> bytes:
     assert len(raw) == 20
     buf = bytearray(100)
     buf[0:8] = b"MComprHD"
+    struct.pack_into(">II", buf, 8, 124, 5)  # header length, version (only v5 is read)
     buf[64:84] = raw
     return bytes(buf)
 
@@ -228,6 +229,7 @@ def build_chd_header(
     """
     buf = bytearray(max(size, 84))
     buf[0:8] = _CHD_MAGIC_FOR_FIXTURES
+    struct.pack_into(">II", buf, 8, CHD_HEADER_SIZE, 5)  # header length, version (only v5 is read)
     struct.pack_into(">Q", buf, 32, logical_bytes)
     struct.pack_into(">Q", buf, 48, meta_offset)
     if rawsha1 is not None:

@@ -2,15 +2,28 @@ import logging
 import struct
 from pathlib import Path
 
-from ..constants import CD_SIZE_THRESHOLD_BYTES
-from ..result import Issue, Method, ScanResult, Status
+from ..result import Candidate, Issue, IssueCode, Method, ScanResult, Status, Tier
 
 logger = logging.getLogger(__name__)
 
 _CHD_MAGIC = b"MComprHD"
-_META_CHTR = b"CHTR"
+
+# Metadata tags. CHT2/CHTR/CHCD mark a CD (CHCD is the oldest CD tag), CHGD/CHGT a
+# GD-ROM track (Dreamcast, but Sega NAOMI GD-ROMs share them), "DVD " a DVD image.
 _META_CHT2 = b"CHT2"
-_META_CHGD = b"CHGD"  # GD-ROM track, Dreamcast only
+_META_CHTR = b"CHTR"
+_META_CHCD = b"CHCD"
+_META_CHGD = b"CHGD"
+_META_CHGT = b"CHGT"
+_META_DVD = b"DVD "
+_CD_TAGS = frozenset({_META_CHT2, _META_CHTR, _META_CHCD})
+_GD_TAGS = frozenset({_META_CHGD, _META_CHGT})
+
+# Fixed header prefix common to every CHD version: tag(8) length(4) version(4),
+# all big-endian. Only version 5 is read beyond this prefix.
+_HEADER_PREFIX_LEN = 16
+_SUPPORTED_VERSION = 5
+_V5_HEADER_LEN = 124
 
 _META_OFFSET_POS = 48
 
@@ -23,16 +36,37 @@ _META_OFFSET_POS = 48
 _RAWSHA1_OFFSET = 64
 _RAWSHA1_LEN = 20
 
-# logicalbytes: uncompressed image size in bytes (CHD v5 header, chd.h).
-# Used only to distinguish CD-sized (PS1) from DVD-sized (PS2) media when the
-# CHTR/CHT2 tag alone can't tell them apart. iso_detect.py uses a separate
-# 4.7 GB PS1/PS2 boundary (DVD5_SIZE_THRESHOLD_BYTES), not this one.
-_LOGICAL_BYTES_OFFSET = 32
-
 # Defends the metadata-chain walk below against a crafted file whose next_offset
 # chain cycles or wanders past EOF: real CHD files have a handful of metadata
 # entries, so this cap is never reached by a well-formed file.
 _MAX_METADATA_ENTRIES = 4096
+
+# A metadata entry header is tag(4) + flags(1) + length(3) + next(8). Only the
+# first CHT2 payload is read, and never more than this many bytes of it.
+_META_ENTRY_HEADER_LEN = 16
+_CHT2_PAYLOAD_CAP_BYTES = 4096
+
+# Allow-lists for CHT2 payload values. Parsed values only ever reach the result
+# through these, so file content never becomes evidence text.
+_CHT2_TRACK_TYPES = frozenset({
+    "MODE1", "MODE1_RAW", "MODE2", "MODE2_FORM1", "MODE2_FORM2", "MODE2_FORM_MIX", "MODE2_RAW", "AUDIO",
+})
+_CHT2_SUBTYPES = frozenset({"NONE", "RW", "RW_RAW"})
+
+# Candidate eras a container-level tag narrows to. A CD tag cannot tell PS1 from
+# PS2 (the CHD does not say which disc is inside), and the DVD tag is shared by
+# every DVD-based console this package knows.
+_CD_CANDIDATE_ERAS = ("ps1", "ps2")
+_DVD_CANDIDATE_ERAS = ("ps2", "xbox", "xbox360")
+
+
+def _read_header_prefix(fh) -> tuple[int, int] | None:
+    """Read magic, length and version. Returns (length, version), or None when
+    the magic is absent. Raises struct.error when the prefix is truncated."""
+    head = fh.read(_HEADER_PREFIX_LEN)
+    if head[:8] != _CHD_MAGIC:
+        return None
+    return struct.unpack(">II", head[8:_HEADER_PREFIX_LEN])
 
 
 def extract_embedded_sha1(path: Path) -> str | None:
@@ -40,14 +74,16 @@ def extract_embedded_sha1(path: Path) -> str | None:
     Read the CHD v5 header's embedded rawsha1 field via fixed-offset parsing.
 
     No hunk decompression, this only reads header bytes. Returns None on any
-    read error, on a header too short to contain the field, or on an
-    all-zero field. An all-zero field means unset: some chdman versions
-    omit it for non-CD types. The value is returned as stored in the header
-    and is never checked against the hunk data.
+    read error, on a header too short to contain the field, on any version
+    other than 5 (other versions put the field elsewhere), on a v5 header whose
+    length field is not 124, and on an all-zero field. An all-zero field means
+    unset: some chdman versions omit it for non-CD types. The value is returned
+    as stored in the header and is never checked against the hunk data.
     """
     try:
         with path.open("rb") as fh:
-            if fh.read(8) != _CHD_MAGIC:
+            prefix = _read_header_prefix(fh)
+            if prefix != (_V5_HEADER_LEN, _SUPPORTED_VERSION):
                 return None
             fh.seek(_RAWSHA1_OFFSET)
             raw = fh.read(_RAWSHA1_LEN)
@@ -61,44 +97,131 @@ def extract_embedded_sha1(path: Path) -> str | None:
         return None
 
 
+def _parse_cht2_payload(payload: bytes) -> tuple[str, ...]:
+    """Turn a CHT2 text payload into evidence codes.
+
+    chdman writes NUL-terminated "KEY:VALUE" tokens separated by spaces
+    ("TRACK:1 TYPE:MODE2_RAW SUBTYPE:NONE FRAMES:300 ..."). Only TYPE and
+    SUBTYPE are used, and only when the value is on an allow-list. No era is
+    derived from them.
+    """
+    text = payload.split(b"\x00", 1)[0].decode("ascii", errors="ignore")
+    fields: dict[str, str] = {}
+    for token in text.split():
+        key, sep, value = token.partition(":")
+        if sep and key not in fields:
+            fields[key] = value
+    if "TYPE" not in fields:
+        return ("chd_cht2_unparsed",)
+    track_type = fields["TYPE"]
+    evidence = [
+        f"chd_cht2_type_{track_type.lower()}" if track_type in _CHT2_TRACK_TYPES else "chd_cht2_type_other"
+    ]
+    if "SUBTYPE" in fields:
+        subtype = fields["SUBTYPE"]
+        evidence.append(
+            f"chd_cht2_subtype_{subtype.lower()}" if subtype in _CHT2_SUBTYPES else "chd_cht2_subtype_other"
+        )
+    return tuple(evidence)
+
+
+def _container_only(
+    reason: str,
+    *,
+    container: str = "chd",
+    evidence: tuple[str, ...] = ("chd_magic",),
+    warnings: list[str] | None = None,
+    issues: tuple[Issue, ...] = (),
+    candidates: tuple[Candidate, ...] = (),
+) -> ScanResult:
+    return ScanResult(
+        title=None, platform=None, era=None, confidence=0.0, reason=reason,
+        warnings=warnings or [], status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL,
+        container=container, evidence=evidence, issues=issues, candidates=candidates,
+    )
+
+
+def _tag_result(tag: bytes, extra_evidence: tuple[str, ...]) -> ScanResult:
+    """The ScanResult for the first recognised platform tag in the chain."""
+    base = ("chd_magic", "chd_v5")
+    tag_name = tag.decode("ascii")
+    if tag in _GD_TAGS:
+        return ScanResult(
+            title=None, platform=None, era="dreamcast", confidence=0.85,
+            reason=f"CHD metadata {tag_name} tag indicates GD-ROM (Dreamcast)",
+            warnings=["not authoritative: Sega NAOMI GD-ROM images use the same GD-ROM track tags"],
+            method=Method.STRUCTURAL, authoritative=False, container="chd_gd",
+            evidence=base + (f"chd_meta_{tag_name.lower()}",) + extra_evidence,
+        )
+    if tag == _META_DVD:
+        eras, container, code, label = _DVD_CANDIDATE_ERAS, "chd_dvd", "chd_meta_dvd", "DVD"
+    else:
+        eras, container, code, label = _CD_CANDIDATE_ERAS, "chd_cd", f"chd_meta_{tag_name.lower()}", "CD"
+    return _container_only(
+        f"CHD {label} image (metadata {tag_name.strip()} tag); the tag does not name a platform",
+        container=container, evidence=base + (code,) + extra_evidence,
+        warnings=[f"CHD {label} tag does not identify the platform, candidates: {', '.join(eras)}"],
+        candidates=tuple(Candidate(era, Tier.WEAK, (code,)) for era in eras),
+    )
+
+
 def detect_chd_platform(path: Path) -> ScanResult:
     """
-    Inspect CHD v5 metadata chain to determine platform.
+    Inspect a CHD's header and metadata chain. Never raises.
 
-    CHGD tag  → Dreamcast (GD-ROM)
-    CHTR/CHT2 → standard CD/DVD track; PS1 vs PS2 is then split by the CHD
-                header's logicalbytes size (CD-sized → PS1, DVD-sized → PS2)
-    Returns a zero-confidence result on any error or unrecognised metadata.
-    Never raises.
+    Only header version 5 is read. Any other version is a container_only result
+    (era None, container "chd") carrying a CHD_VERSION_UNSUPPORTED issue; the
+    metadata chain of other versions is never walked.
 
-    Never authoritative: CHGD means a GD-ROM track, which Sega NAOMI GD-ROM
-    images share with Dreamcast, and the CHTR/CHT2 split is a size guess.
-    A valid CHD header with no platform tag is "container_only".
+    The first recognised tag in the v5 metadata chain decides the result, and
+    the logical size never does:
+      CHT2, CHTR, CHCD (CD)  container_only, container "chd_cd", era None,
+                             candidates ps1, ps2. CHT2's text payload adds
+                             chd_cht2_* evidence codes.
+      DVD tag ("DVD ")       container_only, container "chd_dvd", era None,
+                             candidates ps2, xbox, xbox360.
+      CHGD, CHGT (GD-ROM)    era dreamcast, status guess, authoritative False
+                             (NAOMI GD-ROMs share the tags), container "chd_gd".
+      none of the above      container_only, container "chd".
+    Bad magic is no_signal, a truncated header container_only with a
+    CHD_HEADER_TRUNCATED issue, a v5 header whose length field is not 124
+    container_only with a CHD_HEADER_INVALID issue, and a read error status error.
     """
     try:
         with path.open("rb") as fh:
-            if fh.read(8) != _CHD_MAGIC:
+            try:
+                prefix = _read_header_prefix(fh)
+            except struct.error:
+                return _container_only(
+                    "CHD header truncated, could not read the length and version fields",
+                    issues=(Issue("CHD_HEADER_TRUNCATED", "CHD header ends before the version field"),),
+                )
+            if prefix is None:
                 return ScanResult(
                     title=None, platform=None, era=None, confidence=0.0,
                     reason="CHD magic bytes not found, not a valid CHD file",
                     status=Status.NO_SIGNAL, method=Method.NONE,
                 )
+            header_len, version = prefix
+            if version != _SUPPORTED_VERSION:
+                message = f"CHD header version {version} is not supported, only version 5 is read"
+                return _container_only(
+                    message,
+                    warnings=[f"CHD version {version} is not parsed, no platform information read"],
+                    issues=(Issue(IssueCode.CHD_VERSION_UNSUPPORTED, message),),
+                )
+            if header_len != _V5_HEADER_LEN:
+                message = f"CHD v5 header length is {header_len}, expected {_V5_HEADER_LEN}"
+                return _container_only(message, issues=(Issue("CHD_HEADER_INVALID", message),))
 
             fh.seek(_META_OFFSET_POS)
             raw = fh.read(8)
             if len(raw) < 8:
-                return ScanResult(
-                    title=None, platform=None, era=None, confidence=0.0,
-                    reason="CHD header truncated, could not read metadata offset",
-                    status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container="chd",
-                    evidence=("chd_magic",),
+                return _container_only(
+                    "CHD header truncated, could not read metadata offset",
                     issues=(Issue("CHD_HEADER_TRUNCATED", "CHD header ends before the metadata offset field"),),
                 )
             meta_offset = struct.unpack(">Q", raw)[0]
-
-            fh.seek(_LOGICAL_BYTES_OFFSET)
-            logical_raw = fh.read(8)
-            logical_bytes = struct.unpack(">Q", logical_raw)[0] if len(logical_raw) == 8 else 0
 
             file_size = fh.seek(0, 2)
             visited_offsets: set[int] = set()
@@ -111,54 +234,26 @@ def detect_chd_platform(path: Path) -> ScanResult:
                 visited_offsets.add(meta_offset)
 
                 fh.seek(meta_offset)
-                entry_header = fh.read(16)  # tag(4) + flags(1) + length(3) + next(8)
-                if len(entry_header) < 16:
+                entry_header = fh.read(_META_ENTRY_HEADER_LEN)  # tag(4) + flags(1) + length(3) + next(8)
+                if len(entry_header) < _META_ENTRY_HEADER_LEN:
                     break
 
                 tag = entry_header[0:4]
                 next_offset = struct.unpack(">Q", entry_header[8:16])[0]
 
-                if tag == _META_CHGD:
-                    return ScanResult(
-                        title=None, platform=None, era="dreamcast", confidence=0.85,
-                        reason="CHD metadata CHGD tag indicates GD-ROM (Dreamcast)",
-                        method=Method.STRUCTURAL, authoritative=False, container="chd",
-                        evidence=("chd_meta_chgd",),
-                    )
-
-                if tag in (_META_CHTR, _META_CHT2):
-                    # CHTR/CHT2 only means "standard CD/DVD track". It does NOT
-                    # distinguish PS1 from PS2; both use this tag.
-                    # Deciding properly needs SYSTEM.CNF, which means
-                    # decompressing hunks. Fall back to logical size as a
-                    # non-authoritative guess instead.
-                    if logical_bytes and logical_bytes <= CD_SIZE_THRESHOLD_BYTES:
-                        era, size_desc = "ps1", f"{logical_bytes} bytes, CD-sized"
-                    elif logical_bytes:
-                        era, size_desc = "ps2", f"{logical_bytes} bytes, DVD-sized"
-                    else:
-                        era, size_desc = "ps1", "size unavailable, defaulted to PS1"
-                    return ScanResult(
-                        title=None, platform=None, era=era, confidence=0.3,
-                        reason=f"heuristic guess (low confidence): CHD metadata CHTR/CHT2 tag "
-                               f"confirms a standard CD/DVD track; logical size ({size_desc}) "
-                               f"suggests {era.upper()}",
-                        warnings=[
-                            "not authoritative: CHTR/CHT2 tag + logical size is a heuristic, not "
-                            "a hash match; confirm via hash index or manual verification",
-                        ],
-                        method=Method.SIZE_HEURISTIC, authoritative=False, container="chd",
-                        evidence=("chd_meta_chtr_cht2", "chd_logical_size"),
-                    )
+                if tag == _META_CHT2:
+                    length = struct.unpack(">I", entry_header[4:8])[0] & 0xFFFFFF
+                    payload = fh.read(min(length, _CHT2_PAYLOAD_CAP_BYTES))
+                    return _tag_result(tag, _parse_cht2_payload(payload))
+                if tag in _CD_TAGS or tag in _GD_TAGS or tag == _META_DVD:
+                    return _tag_result(tag, ())
 
                 meta_offset = next_offset
 
-        return ScanResult(
-            title=None, platform=None, era=None, confidence=0.0,
-            reason="CHD container detected but no recognised platform metadata tag found",
-            warnings=["no CHGD/CHTR/CHT2 tag in metadata chain"],
-            status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container="chd",
-            evidence=("chd_magic",),
+        return _container_only(
+            "CHD container detected but no recognised platform metadata tag found",
+            warnings=["no CHT2/CHTR/CHCD/CHGD/CHGT/DVD tag in metadata chain"],
+            evidence=("chd_magic", "chd_v5"),
         )
     except (OSError, struct.error) as exc:
         logger.debug("Failed to read CHD metadata from %s: %s", path, exc)

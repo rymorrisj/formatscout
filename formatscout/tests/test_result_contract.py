@@ -10,6 +10,7 @@ nonexistent index path; a test that needs an index writes a synthetic one.
 import importlib
 import math
 import os
+import struct
 from pathlib import Path
 
 import pytest
@@ -214,7 +215,7 @@ class TestTierForConfidence:
             (0.75, Tier.MODERATE),  # crc32 hit, PVD label
             (0.7, Tier.MODERATE),   # extension only
             (0.35, Tier.WEAK),      # .img size guess
-            (0.3, Tier.WEAK),       # CHD CHTR/CHT2 size guess
+            (0.3, Tier.WEAK),       # weak guess
         ],
     )
     def test_documented_pipeline_values(self, confidence, tier):
@@ -594,22 +595,32 @@ class TestChdSites:
         _tags(result, Method.NONE, Status.NO_SIGNAL, False)
 
     def test_truncated_header_is_container_only_with_issue(self, tmp_path: Path):
-        result = chd_validator.detect_chd_platform(_write(tmp_path / "g.chd", b"MComprHD" + b"\x00" * 40))
+        data = b"MComprHD" + struct.pack(">II", 124, 5) + b"\x00" * 32  # v5 prefix, ends before the metadata offset
+        result = chd_validator.detect_chd_platform(_write(tmp_path / "g.chd", data))
         _tags(result, Method.STRUCTURAL, Status.CONTAINER_ONLY, False)
         assert result.container == "chd"
         assert [issue.code for issue in result.issues] == ["CHD_HEADER_TRUNCATED"]
+
+    def test_unsupported_version_is_container_only_with_issue(self, tmp_path: Path):
+        data = b"MComprHD" + struct.pack(">II", 108, 4) + b"\x00" * 100
+        result = chd_validator.detect_chd_platform(_write(tmp_path / "g.chd", data))
+        _tags(result, Method.STRUCTURAL, Status.CONTAINER_ONLY, False)
+        assert result.container == "chd"
+        assert [issue.code for issue in result.issues] == ["CHD_VERSION_UNSUPPORTED"]
 
     def test_chgd_is_structural_guess(self, tmp_path: Path):
         result = chd_validator.detect_chd_platform(_write(tmp_path / "g.chd", _chd_with_tag(b"CHGD")))
         assert result.era == "dreamcast"
         _tags(result, Method.STRUCTURAL, Status.GUESS, False)
-        assert result.container == "chd"
+        assert result.container == "chd_gd"
 
     @pytest.mark.parametrize("tag", [b"CHTR", b"CHT2"])
-    def test_chtr_cht2_is_size_guess(self, tmp_path: Path, tag: bytes):
+    def test_chtr_cht2_is_container_only_with_candidates(self, tmp_path: Path, tag: bytes):
         result = chd_validator.detect_chd_platform(_write(tmp_path / "g.chd", _chd_with_tag(tag, logical_bytes=1000)))
-        assert result.era == "ps1"
-        _tags(result, Method.SIZE_HEURISTIC, Status.GUESS, False)
+        assert result.era is None
+        _tags(result, Method.STRUCTURAL, Status.CONTAINER_ONLY, False)
+        assert result.container == "chd_cd"
+        assert [candidate.era for candidate in result.candidates] == ["ps1", "ps2"]
 
     def test_no_platform_tag_is_container_only(self, tmp_path: Path):
         result = chd_validator.detect_chd_platform(_write(tmp_path / "g.chd", _chd_with_tag(b"ABCD")))

@@ -36,6 +36,7 @@ TAG_CHT2 = b"CHT2"  # CD track (current)
 TAG_CHTR = b"CHTR"  # CD track (old)
 TAG_CHGD = b"CHGD"  # GD-ROM track (Dreamcast)
 TAG_CHGT = b"CHGT"  # GD-ROM track (old)
+TAG_CHCD = b"CHCD"  # CD (oldest tag, binary payload)
 TAG_DVD = b"DVD "   # DVD marker
 
 _MDFLAG_CHECKSUM = 0x01
