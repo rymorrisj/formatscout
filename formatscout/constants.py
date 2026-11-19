@@ -54,12 +54,23 @@ DIRECTORY_DEPTH2_SCAN_CAP_ENTRIES = 4096
 # not 800 million bytes.
 CD_SIZE_THRESHOLD_BYTES = 800 * 1024 * 1024
 
-# The 4.7 GB DVD-5 boundary iso_detect.detect_from_pvd() uses to split a
-# SLUS/SCES/etc.-prefixed volume label into PS1 (CD-sized) vs PS2 (DVD-sized).
-# Deliberately decimal, unlike the binary-GiB DVD_SIZE_THRESHOLD_BYTES above,
-# because optical-disc capacities are quoted that way. Distinct boundary, do
-# not merge with DVD_SIZE_THRESHOLD_BYTES.
+# The 4.7 GB DVD-5 boundary iso_detect._ps_ambiguous_result() (reached from
+# detect_from_pvd()) uses only to order the ps1/ps2 candidates of a
+# PlayStation-shaped PVD with no readable SYSTEM.CNF BOOT/BOOT2 key: past it
+# ps2 is listed first at a higher tier. It never names an era and never
+# changes the result's method or candidate set. Deliberately decimal, unlike
+# the binary-GiB DVD_SIZE_THRESHOLD_BYTES above, because optical-disc
+# capacities are quoted that way. Distinct boundary, do not merge with
+# DVD_SIZE_THRESHOLD_BYTES.
 DVD5_SIZE_THRESHOLD_BYTES = 4_700_000_000
+
+# Confidence of detector._resolve_container_by_title()'s exact filename-title
+# match for a CHD. It rests on the file name alone, so it stays below the
+# era-bearing results read from the file's own bytes (structural, magic and
+# PE results start at 0.65, an uncorroborated md5 hit or CHD header claim is
+# 0.45). Not below an uncorroborated crc32 hit (0.35), which never applies to
+# a CHD.
+TITLE_MATCH_CONFIDENCE = 0.40
 
 # No DEFAULT_INDEX_PATH constant here. hash_lookup.default_index_path() is
 # the single source of truth for that path; detector.py, classify.py, and

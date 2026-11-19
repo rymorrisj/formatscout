@@ -661,6 +661,19 @@ class TestChdTitleResolution:
         assert result.title == "Ico (USA)"
         assert result.container == "chd_cd"
         assert result.issues == ()
+        assert result.confidence == 0.40
+
+    def test_title_match_confidence_is_below_byte_based_guesses(self):
+        """A filename-only match scores below an uncorroborated md5 hit or
+        CHD header claim, and sits in Tier.WEAK."""
+        from formatscout import detector
+        from formatscout.constants import TITLE_MATCH_CONFIDENCE
+        from formatscout.result import Method, Tier, tier_for_confidence
+
+        assert TITLE_MATCH_CONFIDENCE == 0.40
+        assert TITLE_MATCH_CONFIDENCE < detector._UNCORROBORATED_HASH_CONFIDENCE[Method.HASH_MD5]
+        assert TITLE_MATCH_CONFIDENCE < detector._UNCORROBORATED_HASH_CONFIDENCE[Method.CHD_HEADER_CLAIM]
+        assert tier_for_confidence(TITLE_MATCH_CONFIDENCE) is Tier.WEAK
 
     def test_disc_suffix_in_the_filename_is_ignored(self, tmp_path: Path, monkeypatch):
         from formatscout import detector
@@ -744,6 +757,161 @@ class TestChdTitleResolution:
         result = _detect(_chd_file(tmp_path, "Ico (USA).chd"))
 
         assert result.era is None
+        assert result.reason != "unexpected detection error"
+
+
+# ---------------------------------------------------------------------------
+# CHD header rawsha1 claim, reconciled with detect_chd() like an md5 hit
+# ---------------------------------------------------------------------------
+
+_CLAIM_RAWSHA1 = bytes(range(1, 21))
+_CLAIM_TITLE = "Claimed Game (USA)"
+
+
+def _claim_chd(tmp_path: Path, monkeypatch, claimed_era: str, metadata=()) -> Path:
+    """A real v5 CHD whose header rawsha1 is the only key of a one-entry
+    index naming *claimed_era*, with *metadata* as its metadata chain."""
+    from formatscout.tests.builders import chd
+    from formatscout.tests.builders import index as index_builder
+
+    index_dir = tmp_path / "claim_idx"
+    index_dir.mkdir()
+    index_path = index_builder.write_index_v1(
+        index_dir / "index.json",
+        [index_builder.IndexEntry(_CLAIM_RAWSHA1.hex(), _CLAIM_TITLE, claimed_era, "Synthetic Platform")],
+    )
+    fx.patch_detector_index(monkeypatch, index_path)
+    path = tmp_path / "game.chd"
+    path.write_bytes(chd.build_chd(version=5, metadata=tuple(metadata), rawsha1=_CLAIM_RAWSHA1).data)
+    return path
+
+
+def _cd_tag():
+    from formatscout.tests.builders import chd
+    return chd.track_entry(chd.TAG_CHT2)
+
+
+def _gd_tag():
+    from formatscout.tests.builders import chd
+    return chd.track_entry(chd.TAG_CHGD, track_type="MODE1_RAW")
+
+
+def _dvd_tag():
+    from formatscout.tests.builders import chd
+    return chd.dvd_entry()
+
+
+class TestChdHeaderClaim:
+    def test_claim_does_not_return_before_detect_chd_runs(self, tmp_path: Path, monkeypatch):
+        from formatscout import detector
+
+        path = _claim_chd(tmp_path, monkeypatch, "ps2", [_cd_tag()])
+        calls: list[Path] = []
+        real_detect_chd = detector.detect_chd
+
+        def _spy(chd_path):
+            calls.append(chd_path)
+            return real_detect_chd(chd_path)
+
+        monkeypatch.setattr(detector, "detect_chd", _spy)
+
+        _detect(path)
+
+        assert calls == [path]
+
+    def test_claim_agreeing_with_gd_tag_records_corroboration(self, tmp_path: Path, monkeypatch):
+        from formatscout.result import Method, Status
+
+        result = _detect(_claim_chd(tmp_path, monkeypatch, "dreamcast", [_gd_tag()]))
+
+        assert result.era == "dreamcast"
+        assert (result.method, result.status, result.authoritative) == (Method.STRUCTURAL, Status.GUESS, False)
+        assert result.container == "chd_gd"
+        assert "chd_rawsha1_index_match" in result.evidence
+        assert result.title == _CLAIM_TITLE
+        assert "corroborated by sha1 match (CHD embedded rawsha1)" in result.reason
+        assert result.issues == ()
+
+    def test_claim_disagreeing_with_gd_tag_loses_with_conflicting_evidence(self, tmp_path: Path, monkeypatch):
+        from formatscout.result import IssueCode, Method
+
+        result = _detect(_claim_chd(tmp_path, monkeypatch, "ps2", [_gd_tag()]))
+
+        assert result.era == "dreamcast"
+        assert result.method == Method.STRUCTURAL
+        assert result.container == "chd_gd"
+        assert _codes(result) == [IssueCode.CONFLICTING_EVIDENCE]
+        assert result.issues[0].message in result.warnings
+        assert result.title is None
+
+    @pytest.mark.parametrize(
+        "tag, claimed_era, container",
+        [(_cd_tag, "ps2", "chd_cd"), (_cd_tag, "ps1", "chd_cd"), (_dvd_tag, "xbox", "chd_dvd")],
+    )
+    def test_claim_inside_tag_candidates_picks_one(
+        self, tmp_path: Path, monkeypatch, tag, claimed_era: str, container: str,
+    ):
+        from formatscout.result import IssueCode, Method, Status
+
+        result = _detect(_claim_chd(tmp_path, monkeypatch, claimed_era, [tag()]))
+
+        assert result.era == claimed_era
+        assert (result.method, result.status, result.authoritative) == (
+            Method.CHD_HEADER_CLAIM, Status.GUESS, False,
+        )
+        assert result.container == container
+        assert "chd_rawsha1_index_match" in result.evidence
+        assert IssueCode.CLAIM_UNVERIFIED in _codes(result)
+        assert IssueCode.CONFLICTING_EVIDENCE not in _codes(result)
+
+    @pytest.mark.parametrize("tag, container", [(_cd_tag, "chd_cd"), (_dvd_tag, "chd_dvd")])
+    def test_claim_outside_tag_candidates_keeps_the_container_result(
+        self, tmp_path: Path, monkeypatch, tag, container: str,
+    ):
+        from formatscout.result import IssueCode, Method, Status
+
+        result = _detect(_claim_chd(tmp_path, monkeypatch, "dreamcast", [tag()]))
+
+        assert result.era is None
+        assert (result.method, result.status) == (Method.STRUCTURAL, Status.CONTAINER_ONLY)
+        assert result.container == container
+        assert IssueCode.CONFLICTING_EVIDENCE in _codes(result)
+
+    def test_claim_without_a_tag_is_a_weak_unverified_guess(self, tmp_path: Path, monkeypatch):
+        from formatscout.result import IssueCode, Method, Status, Tier, tier_for_confidence
+
+        result = _detect(_claim_chd(tmp_path, monkeypatch, "dreamcast"))
+
+        assert result.era == "dreamcast"
+        assert (result.method, result.status, result.authoritative) == (
+            Method.CHD_HEADER_CLAIM, Status.GUESS, False,
+        )
+        assert result.confidence == 0.45
+        assert tier_for_confidence(result.confidence) is Tier.WEAK
+        assert IssueCode.CLAIM_UNVERIFIED in _codes(result)
+        assert IssueCode.HASH_WEAK not in _codes(result)
+        # detect_chd()'s own "no recognised tag" container, not lookup()'s.
+        assert result.container == "chd"
+        assert {"chd_magic", "chd_v5", "chd_rawsha1_index_match"} <= set(result.evidence)
+
+    def test_dispatch_error_after_a_claim_keeps_the_claim_without_a_container(self, tmp_path: Path, monkeypatch):
+        from formatscout import detector
+        from formatscout.result import IssueCode, Method
+
+        path = _claim_chd(tmp_path, monkeypatch, "ps2", [_cd_tag()])
+
+        def _boom(chd_path):
+            raise RuntimeError("detect_chd exploded")
+
+        monkeypatch.setattr(detector, "detect_chd", _boom)
+
+        result = _detect(path)
+
+        assert result.era == "ps2"
+        assert result.method == Method.CHD_HEADER_CLAIM
+        assert result.authoritative is False
+        assert result.container is None
+        assert IssueCode.CLAIM_UNVERIFIED in _codes(result)
         assert result.reason != "unexpected detection error"
 
 

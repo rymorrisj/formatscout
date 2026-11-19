@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-from .constants import CD_SIZE_THRESHOLD_BYTES
+from .constants import CD_SIZE_THRESHOLD_BYTES, TITLE_MATCH_CONFIDENCE
 from .hashing import hash_lookup as _hash_lookup
 from .hashing import title_match as _title_match
 from .index_errors import INDEX_UNAVAILABLE, IndexUnavailable
@@ -53,32 +53,46 @@ def _compute_requires_install(path: Path, era: str | None) -> bool:
     return False
 
 
-# ── md5/crc32 corroboration ──────────────────────────────────────────────────
-# An md5 or crc32 index hit is not proof (see hash_lookup.lookup()), so it no
-# longer short-circuits detection: the suffix dispatch runs as well and the two
-# are reconciled in _reconcile_weak_hash(). Only these methods count as
-# structural evidence that can corroborate or overrule the hit; extension-only
-# and size-threshold results are not evidence about the file's content.
+# ── md5/crc32/CHD header claim corroboration ─────────────────────────────────
+# An md5 or crc32 index hit is not proof (see hash_lookup.lookup()), and nor is
+# a CHD header rawsha1 hit: the header is forgeable and the value is never
+# checked against the hunks. None of them short-circuits detection: the suffix
+# dispatch runs as well (detect_chd() for a .chd) and the two are reconciled
+# in _reconcile_weak_hash(). Only these methods count as structural evidence
+# that can corroborate or overrule the hit; extension-only and size-threshold
+# results are not evidence about the file's content.
 
-_WEAK_HASH_METHODS = frozenset({Method.HASH_MD5, Method.HASH_CRC32})
+_WEAK_HASH_METHODS = frozenset({Method.HASH_MD5, Method.HASH_CRC32, Method.CHD_HEADER_CLAIM})
 _STRUCTURAL_METHODS = frozenset({
     Method.MAGIC, Method.STRUCTURAL, Method.SYSTEM_CNF, Method.PE_HEADER, Method.DIRECTORY_MARKER,
 })
-# Confidence of an md5/crc32 hit that nothing structural corroborates (both in
-# Tier.WEAK). lookup() itself still reports 0.85 / 0.75.
-_UNCORROBORATED_HASH_CONFIDENCE = {Method.HASH_MD5: 0.45, Method.HASH_CRC32: 0.35}
+# Confidence of a hit that nothing structural corroborates (all in
+# Tier.WEAK). lookup() itself still reports 0.85 (md5), 0.75 (crc32) and 1.0
+# (CHD header claim).
+_UNCORROBORATED_HASH_CONFIDENCE = {
+    Method.HASH_MD5: 0.45, Method.HASH_CRC32: 0.35, Method.CHD_HEADER_CLAIM: 0.45,
+}
+_HASH_KINDS = {Method.HASH_MD5: "md5", Method.HASH_CRC32: "crc32", Method.CHD_HEADER_CLAIM: "chd_rawsha1"}
 
 
 def _hash_kind(hit: ScanResult) -> str:
-    return "md5" if hit.method is Method.HASH_MD5 else "crc32"
+    """Short name of the hash a held-back hit matched on, used in evidence
+    codes and messages ("md5", "crc32" or "chd_rawsha1")."""
+    return _HASH_KINDS[hit.method]
+
+
+def _claim_issue(message: str) -> Issue:
+    """CLAIM_UNVERIFIED issue for a result whose era rests on a CHD header
+    rawsha1 claim."""
+    return Issue(IssueCode.CLAIM_UNVERIFIED, message)
 
 
 def _structural_for_weak_hit(
     path: Path, dir_cache: dict[Path, list[Path]] | None,
 ) -> ScanResult | None:
     """The suffix dispatch result for a file that already has an md5/crc32
-    hit, or None if the dispatch raised: the hit then stands alone instead of
-    being lost to detect()'s catch-all."""
+    hit or a CHD header claim, or None if the dispatch raised: the hit then
+    stands alone instead of being lost to detect()'s catch-all."""
     try:
         return _detect_file(path, dir_cache)
     except Exception as exc:
@@ -97,7 +111,8 @@ def _conflict_issue(hit: ScanResult, other: ScanResult, kept: str) -> tuple[Issu
 
 
 def _reconcile_weak_hash(hit: ScanResult, other: ScanResult | None) -> ScanResult:
-    """Combine an md5/crc32 hit (era set, guess) with the suffix dispatch result.
+    """Combine an md5/crc32 hit or a CHD header rawsha1 claim (era set,
+    guess) with the suffix dispatch result (detect_chd() for a .chd).
 
     * Structural evidence with the same era: the structural result is kept
       (method, status, authoritative, container, requires_extraction) and
@@ -106,16 +121,20 @@ def _reconcile_weak_hash(hit: ScanResult, other: ScanResult | None) -> ScanResul
     * Structural evidence with a different era: the structural result wins
       unchanged apart from a CONFLICTING_EVIDENCE issue and warning.
     * Structural candidates (era None) that include the hit's era: the hit
-      picks among them and keeps its confidence (guess, not authoritative).
-      Candidates that exclude it: the structural result wins, with
-      CONFLICTING_EVIDENCE.
+      picks among them and keeps its confidence (guess, not authoritative),
+      taking the structural container (chd_cd/chd_dvd for a CHD); a CHD
+      claim also gets CLAIM_UNVERIFIED. Candidates that exclude it: the
+      structural result wins, with CONFLICTING_EVIDENCE.
     * No structural era evidence: the hit is returned as a weak guess at
-      reduced confidence with HASH_WEAK. A non-structural guess (extension,
-      size) that agrees only lifts the confidence to its own value; one that
-      disagrees adds CONFLICTING_EVIDENCE but does not overrule the hit.
+      reduced confidence with HASH_WEAK (CLAIM_UNVERIFIED for a CHD claim),
+      and the dispatch result's container (None when the dispatch raised).
+      A non-structural guess (extension, size) that agrees only lifts the
+      confidence to its own value; one that disagrees adds
+      CONFLICTING_EVIDENCE but does not overrule the hit.
     """
     kind = _hash_kind(hit)
     match_code = f"{kind}_index_match"
+    is_claim = hit.method is Method.CHD_HEADER_CLAIM
 
     if other is not None and other.method in _STRUCTURAL_METHODS:
         if other.era is not None:
@@ -140,6 +159,10 @@ def _reconcile_weak_hash(hit: ScanResult, other: ScanResult | None) -> ScanResul
                 hit.evidence = other.evidence + (match_code,)
                 hit.warnings = list(other.warnings) + hit.warnings
                 hit.issues = other.issues + hit.issues
+                if is_claim:
+                    hit.issues += (_claim_issue(
+                        "era picked by the CHD header rawsha1 claim, which was not checked against the image data",
+                    ),)
                 return hit
             issue, message = _conflict_issue(hit, other, "structural result")
             other.issues += (issue,)
@@ -149,11 +172,16 @@ def _reconcile_weak_hash(hit: ScanResult, other: ScanResult | None) -> ScanResul
     hit.confidence = _UNCORROBORATED_HASH_CONFIDENCE[hit.method]
     hit.reason = f"{hit.reason} (no structural corroboration)"
     hit.evidence = (match_code,)
+    # The container comes from the dispatch result only: lookup()'s "chd"
+    # is not a reading of the CHD metadata.
+    hit.container = other.container if other is not None else None
     weak_message = f"{kind} index hit without structural corroboration; era is a weak guess"
-    hit.issues += (Issue(IssueCode.HASH_WEAK, weak_message),)
+    if is_claim:
+        hit.issues += (_claim_issue(f"{weak_message}; the claim was not checked against the image data"),)
+    else:
+        hit.issues += (Issue(IssueCode.HASH_WEAK, weak_message),)
     hit.warnings.append(weak_message)
     if other is not None:
-        hit.container = other.container
         hit.evidence = other.evidence + hit.evidence
         hit.warnings = list(other.warnings) + hit.warnings
         hit.issues = other.issues + hit.issues
@@ -171,9 +199,9 @@ def _reconcile_weak_hash(hit: ScanResult, other: ScanResult | None) -> ScanResul
 # A CHD's raw bytes cannot be hash-matched and its CD/DVD metadata tag does not
 # name a platform, so detect_chd() returns container_only with candidate eras.
 # An exact normalized match of the filename stem against the index titles of
-# exactly one candidate era picks that era, as a guess.
-
-_TITLE_MATCH_CONFIDENCE = 0.5
+# exactly one candidate era picks that era, as a guess, at
+# constants.TITLE_MATCH_CONFIDENCE: the filename alone, so it scores below the
+# era-bearing results read from the file's own bytes.
 
 
 def _wants_title_resolution(path: Path, result: ScanResult) -> bool:
@@ -207,7 +235,7 @@ def _resolve_container_by_title(path: Path, result: ScanResult, index_path: Path
     match = matches[0]
     platform = _one_line(match.platform or match.era, limit=80)
     return ScanResult(
-        title=match.title, platform=match.platform, era=match.era, confidence=_TITLE_MATCH_CONFIDENCE,
+        title=match.title, platform=match.platform, era=match.era, confidence=TITLE_MATCH_CONFIDENCE,
         reason=f"title match in {platform} index (hash lookup unavailable for CHD)",
         warnings=list(result.warnings),
         status=Status.GUESS, method=Method.TITLE_MATCH, authoritative=False,
@@ -270,9 +298,9 @@ def _detect(
             status=Status.ERROR, method=Method.NONE,
         )
 
-    # Tier 1: hash lookup. A sha1 hit on the file's own bytes or a CHD header
-    # claim that resolves an era returns immediately. An md5/crc32 hit is held
-    # back and reconciled with the suffix dispatch below (see
+    # Tier 1: hash lookup. A sha1 hit on the file's own bytes that resolves an
+    # era returns immediately. An md5/crc32 hit or a CHD header rawsha1 claim
+    # is held back and reconciled with the suffix dispatch below (see
     # _reconcile_weak_hash()). A match with era=None falls through to Tier 2+.
     # Directories are a first-class input (Tier 4), not a hashable file, so
     # skip this tier for them entirely rather than reaching hash_file()'s
