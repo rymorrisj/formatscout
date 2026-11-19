@@ -612,6 +612,142 @@ class TestWeakHashCorroboration:
 
 
 # ---------------------------------------------------------------------------
+# CHD candidate resolution by filename title (container_only + candidates)
+# ---------------------------------------------------------------------------
+
+def _chd_container_only(eras=("ps1", "ps2"), container="chd_cd"):
+    """What detect_chd() returns for a CD/DVD-tagged CHD per the lane
+    interface: era None, container_only, candidate eras."""
+    from formatscout.result import Candidate, Method, ScanResult, Status, Tier
+    return ScanResult(
+        title=None, platform=None, era=None, confidence=0.0, reason="CHD CD track metadata, platform unknown",
+        status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container=container,
+        candidates=tuple(Candidate(era, Tier.WEAK) for era in eras),
+    )
+
+
+def _title_index(tmp_path: Path, titles) -> Path:
+    from formatscout.tests.builders import index as index_builder
+    entries = [
+        index_builder.IndexEntry(f"{n:040x}", title, era, platform)
+        for n, (title, era, platform) in enumerate(titles, start=1)
+    ]
+    index_dir = tmp_path / "idx"
+    index_dir.mkdir()
+    return index_builder.write_index_v1(index_dir / "index.json", entries)
+
+
+def _chd_file(tmp_path: Path, name: str) -> Path:
+    # Header with an all-zero rawsha1: lookup() loads the index, finds no
+    # embedded hash and returns None.
+    path = tmp_path / name
+    path.write_bytes(bytes(fx.build_chd_header()))
+    return path
+
+
+class TestChdTitleResolution:
+    def test_single_candidate_era_match_resolves_as_title_match(self, tmp_path: Path, monkeypatch):
+        from formatscout import detector
+        from formatscout.result import Method, Status
+
+        fx.patch_detector_index(monkeypatch, _title_index(tmp_path, [("Ico (USA)", "ps2", "Sony - PlayStation 2")]))
+        monkeypatch.setattr(detector, "detect_chd", lambda path: _chd_container_only())
+
+        result = _detect(_chd_file(tmp_path, "Ico (USA).chd"))
+
+        assert result.era == "ps2"
+        assert (result.method, result.status, result.authoritative) == (Method.TITLE_MATCH, Status.GUESS, False)
+        assert result.reason == "title match in Sony - PlayStation 2 index (hash lookup unavailable for CHD)"
+        assert result.title == "Ico (USA)"
+        assert result.container == "chd_cd"
+        assert result.issues == ()
+
+    def test_disc_suffix_in_the_filename_is_ignored(self, tmp_path: Path, monkeypatch):
+        from formatscout import detector
+
+        fx.patch_detector_index(monkeypatch, _title_index(tmp_path, [("Ico (USA)", "ps2", "Sony - PlayStation 2")]))
+        monkeypatch.setattr(detector, "detect_chd", lambda path: _chd_container_only())
+
+        assert _detect(_chd_file(tmp_path, "Ico - Disc 1.chd")).era == "ps2"
+
+    def test_several_matching_eras_stay_ambiguous(self, tmp_path: Path, monkeypatch):
+        from formatscout import detector
+        from formatscout.result import IssueCode, Status
+
+        fx.patch_detector_index(monkeypatch, _title_index(tmp_path, [
+            ("Ico (USA)", "ps2", "Sony - PlayStation 2"), ("Ico (Japan)", "ps1", "Sony - PlayStation"),
+        ]))
+        monkeypatch.setattr(detector, "detect_chd", lambda path: _chd_container_only())
+
+        result = _detect(_chd_file(tmp_path, "Ico (USA).chd"))
+
+        assert result.era is None
+        assert result.status == Status.CONTAINER_ONLY
+        assert [issue.code for issue in result.issues] == [IssueCode.AMBIGUOUS_CONTAINER]
+
+    def test_match_outside_the_candidates_is_ignored(self, tmp_path: Path, monkeypatch):
+        from formatscout import detector
+        from formatscout.result import Status
+
+        fx.patch_detector_index(monkeypatch, _title_index(tmp_path, [("Ico (USA)", "xbox", "Microsoft - Xbox")]))
+        monkeypatch.setattr(detector, "detect_chd", lambda path: _chd_container_only())
+
+        result = _detect(_chd_file(tmp_path, "Ico (USA).chd"))
+
+        assert (result.era, result.status, result.issues) == (None, Status.CONTAINER_ONLY, ())
+
+    def test_no_match_leaves_the_result_unchanged(self, tmp_path: Path, monkeypatch):
+        from formatscout import detector
+        from formatscout.result import Method
+
+        fx.patch_detector_index(monkeypatch, _title_index(tmp_path, [("Ico (USA)", "ps2", None)]))
+        monkeypatch.setattr(detector, "detect_chd", lambda path: _chd_container_only())
+
+        result = _detect(_chd_file(tmp_path, "Something Else.chd"))
+
+        assert (result.era, result.method, result.issues) == (None, Method.STRUCTURAL, ())
+
+    def test_unavailable_index_adds_only_the_existing_issue(self, tmp_path: Path, monkeypatch):
+        from formatscout import detector
+        from formatscout.tests.builders import index as index_builder
+
+        fx.patch_detector_index(monkeypatch, index_builder.write_corrupt_index(tmp_path / "index.json", "invalid_json"))
+        monkeypatch.setattr(detector, "detect_chd", lambda path: _chd_container_only())
+
+        result = _detect(_chd_file(tmp_path, "Ico (USA).chd"))
+
+        assert result.era is None
+        assert [issue.code for issue in result.issues] == ["INDEX_UNAVAILABLE"]
+        assert len(result.warnings) == 1
+
+    def test_missing_index_skips_silently(self, tmp_path: Path, monkeypatch):
+        from formatscout import detector
+
+        _no_index(monkeypatch, tmp_path)
+        monkeypatch.setattr(detector, "detect_chd", lambda path: _chd_container_only())
+
+        result = _detect(_chd_file(tmp_path, "Ico (USA).chd"))
+
+        assert (result.era, result.issues) == (None, ())
+
+    def test_title_match_error_never_escapes_detect(self, tmp_path: Path, monkeypatch):
+        from formatscout import detector
+
+        fx.patch_detector_index(monkeypatch, _title_index(tmp_path, [("Ico (USA)", "ps2", None)]))
+        monkeypatch.setattr(detector, "detect_chd", lambda path: _chd_container_only())
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("title table exploded")
+
+        monkeypatch.setattr(detector._title_match, "exact_title_matches", _boom)
+
+        result = _detect(_chd_file(tmp_path, "Ico (USA).chd"))
+
+        assert result.era is None
+        assert result.reason != "unexpected detection error"
+
+
+# ---------------------------------------------------------------------------
 # Fail-soft contract: detect() never raises
 # ---------------------------------------------------------------------------
 

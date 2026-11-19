@@ -174,3 +174,78 @@ class TestMismatchNeverFiresFalsely:
 
         assert result.status == "not_in_index"
         assert result.matched_title is None
+
+
+# ---------------------------------------------------------------------------
+# Cross-era title fallback: WRONG_ERA, numeric tokens, ties
+# ---------------------------------------------------------------------------
+
+def _title_index(tmp_path: Path, titles: list[tuple[str, str]]) -> Path:
+    """Index of (title, era) entries keyed by unrelated sha1s, so only the
+    title fallback can match."""
+    from formatscout.tests.builders import index as index_builder
+    entries = [
+        index_builder.IndexEntry(f"{n:040x}", title, era, "Synthetic Platform")
+        for n, (title, era) in enumerate(titles, start=1)
+    ]
+    index_dir = tmp_path / "idx"
+    index_dir.mkdir()
+    return index_builder.write_index_v1(index_dir / "index.json", entries)
+
+
+def _unindexed_file(tmp_path: Path) -> Path:
+    game_file = tmp_path / "game.bin"
+    game_file.write_bytes(fx.UNINDEXED_CONTENT)
+    return game_file
+
+
+class TestCrossEraTitleMatch:
+    def test_best_match_outside_supplied_era_reports_wrong_era(self, tmp_path: Path, monkeypatch):
+        fx.patch_classify_index(monkeypatch, fx.write_synthetic_index(tmp_path))
+
+        result = _classify(_unindexed_file(tmp_path), title=fx.TITLE_QUERY_ABOVE_THRESHOLD, era="ps2")
+
+        assert result.status == "mismatch"
+        assert result.matched_title == fx.TITLE_MATCH_INDEXED_TITLE
+        assert result.matched_era == "ps1"
+        assert [issue.code for issue in result.issues] == ["WRONG_ERA"]
+
+    def test_best_match_inside_supplied_era_has_no_wrong_era(self, tmp_path: Path, monkeypatch):
+        fx.patch_classify_index(monkeypatch, fx.write_synthetic_index(tmp_path))
+
+        result = _classify(_unindexed_file(tmp_path), title=fx.TITLE_QUERY_ABOVE_THRESHOLD, era="ps1")
+
+        assert (result.status, result.matched_era, result.issues) == ("mismatch", "ps1", ())
+
+    def test_tie_at_the_top_prefers_the_supplied_era(self, tmp_path: Path, monkeypatch):
+        fx.patch_classify_index(
+            monkeypatch, _title_index(tmp_path, [("Same Game (USA)", "ps1"), ("Same Game (Europe)", "ps2")]),
+        )
+
+        result = _classify(_unindexed_file(tmp_path), title="Same Game", era="ps2")
+
+        assert (result.status, result.matched_era, result.matched_title) == ("mismatch", "ps2", "Same Game (Europe)")
+        assert result.issues == ()
+
+    def test_sequel_number_must_be_equal(self, tmp_path: Path, monkeypatch):
+        # ratio("tekken 2", "tekken 3") == 0.875 would clear 0.80 without the numeric rule.
+        fx.patch_classify_index(monkeypatch, _title_index(tmp_path, [("Tekken 2 (USA)", "ps1")]))
+
+        result = _classify(_unindexed_file(tmp_path), title="Tekken 3", era="ps1")
+
+        assert result.status == "not_in_index"
+
+    def test_roman_numeral_equals_digit(self, tmp_path: Path, monkeypatch):
+        fx.patch_classify_index(monkeypatch, _title_index(tmp_path, [("Tekken III (USA)", "ps1")]))
+
+        # ratio("tekken iii", "tekken 3") == 14/18 ~ 0.778, so a lower threshold.
+        result = _classify(_unindexed_file(tmp_path), title="Tekken 3", era="ps1", threshold=0.75)
+
+        assert (result.status, result.matched_title) == ("mismatch", "Tekken III (USA)")
+
+    def test_era_none_still_skips_the_cross_era_search(self, tmp_path: Path, monkeypatch):
+        fx.patch_classify_index(monkeypatch, fx.write_synthetic_index(tmp_path))
+
+        result = _classify(_unindexed_file(tmp_path), title=fx.TITLE_MATCH_INDEXED_TITLE, era=None)
+
+        assert result.status == "not_in_index"

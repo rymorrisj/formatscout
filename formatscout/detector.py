@@ -3,6 +3,7 @@ from pathlib import Path
 
 from .constants import CD_SIZE_THRESHOLD_BYTES
 from .hashing import hash_lookup as _hash_lookup
+from .hashing import title_match as _title_match
 from .index_errors import INDEX_UNAVAILABLE, IndexUnavailable
 from .index_path import coerce_index_path, resolve_index_path
 from .magic.magic_detect import detect_from_magic, magic_tags
@@ -166,6 +167,56 @@ def _reconcile_weak_hash(hit: ScanResult, other: ScanResult | None) -> ScanResul
     return hit
 
 
+# ── CHD candidate resolution by filename title ──────────────────────────────
+# A CHD's raw bytes cannot be hash-matched and its CD/DVD metadata tag does not
+# name a platform, so detect_chd() returns container_only with candidate eras.
+# An exact normalized match of the filename stem against the index titles of
+# exactly one candidate era picks that era, as a guess.
+
+_TITLE_MATCH_CONFIDENCE = 0.5
+
+
+def _wants_title_resolution(path: Path, result: ScanResult) -> bool:
+    return (
+        path.suffix.lower() == ".chd"
+        and result.status is Status.CONTAINER_ONLY
+        and bool(result.candidates)
+    )
+
+
+def _resolve_container_by_title(path: Path, result: ScanResult, index_path: Path) -> ScanResult:
+    """*result* resolved to one candidate era by an exact filename-title
+    match, or *result* unchanged (no match, or the index could not be read:
+    any index issue was already reported by the hash tier), or *result* with
+    an AMBIGUOUS_CONTAINER issue when several candidate eras match."""
+    eras = tuple(dict.fromkeys(c.era for c in result.candidates))
+    try:
+        matches = _title_match.exact_title_matches(path.stem, eras, index_path=index_path)
+    except Exception as exc:
+        log.debug("Title match skipped for '%s': %s", path, exc)
+        return result
+    if not matches:
+        return result
+    if len(matches) > 1:
+        names = ", ".join(m.era for m in matches)
+        result.issues += (Issue(
+            IssueCode.AMBIGUOUS_CONTAINER,
+            _one_line(f"filename title matches index titles in several candidate eras: {names}", limit=200),
+        ),)
+        return result
+    match = matches[0]
+    platform = _one_line(match.platform or match.era, limit=80)
+    return ScanResult(
+        title=match.title, platform=match.platform, era=match.era, confidence=_TITLE_MATCH_CONFIDENCE,
+        reason=f"title match in {platform} index (hash lookup unavailable for CHD)",
+        warnings=list(result.warnings),
+        status=Status.GUESS, method=Method.TITLE_MATCH, authoritative=False,
+        container=result.container, candidates=result.candidates,
+        evidence=result.evidence + ("filename_title_exact_match",),
+        issues=result.issues, platform_hint=result.platform_hint,
+    )
+
+
 # ── Index-failure warning ────────────────────────────────────────────────────
 
 def _index_unavailable_warning(exc: Exception) -> str:
@@ -228,9 +279,12 @@ def _detect(
     # path.open("rb") only to fail.
     index_warning: str | None = None
     weak_hit: ScanResult | None = None
+    resolved_index: Path | None = None  # set only once lookup() ran without error
     if path.is_file():
         try:
-            result = _hash_lookup.lookup(path, resolve_index_path(index_path, override=_INDEX_PATH))
+            target_index = resolve_index_path(index_path, override=_INDEX_PATH)
+            result = _hash_lookup.lookup(path, target_index)
+            resolved_index = target_index
             if result is not None and result.era is not None:
                 if result.method in _WEAK_HASH_METHODS:
                     weak_hit = result
@@ -262,6 +316,8 @@ def _detect(
         result = _reconcile_weak_hash(weak_hit, _structural_for_weak_hit(path, dir_cache))
     elif path.is_file():
         result = _detect_file(path, dir_cache)
+        if resolved_index is not None and _wants_title_resolution(path, result):
+            result = _resolve_container_by_title(path, result, resolved_index)
     elif path.is_dir():
         result = detect_directory(path)
     else:

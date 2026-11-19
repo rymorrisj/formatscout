@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from .hashing import hash_lookup as _hash_lookup
-from .hashing.title_match import fuzzy_title_match
+from .hashing.title_match import TitleMatch, fuzzy_title_match
 from .index_errors import INDEX_UNAVAILABLE, IndexUnavailable
 from .index_path import coerce_index_path, resolve_index_path
 from .result import ClassifyResult, HashKind, Issue, IssueCode
@@ -13,6 +13,9 @@ from .validators.chd_validator import extract_embedded_sha1
 # suite points it at a tmp path; leave it None in application code.
 _INDEX_PATH: Path | None = None
 _DEFAULT_THRESHOLD = 0.80
+# How many cross-era title candidates classify() asks for (ties at the top
+# score are resolved in favour of the supplied era among these).
+_TITLE_CANDIDATES = 5
 
 
 def classify(
@@ -34,6 +37,16 @@ def classify(
     With strict=True the second case raises IndexUnavailable instead. A
     missing index file at a custom path (FileNotFoundError) is neither: it is
     treated as an empty index, with an INDEX_MISSING issue.
+
+    Title fallback (no hash matched): the title is matched across every era
+    in the index (fuzzy_title_match()), not only *era*. When the best match
+    (ties at the top score go to *era*) is in *era*, the result is the same
+    "mismatch" as before, with matched_era=era. When it lies in another era,
+    the status is still "mismatch" but matched_title/similarity describe that
+    out-of-era title, matched_era is its era, and a WRONG_ERA issue is added.
+    era=None (or empty) still skips the title fallback entirely (fail closed).
+    Numeric tokens must agree for any title match (see fuzzy_title_match()),
+    so sequels that differ only by a number no longer produce "mismatch".
     """
     explicit_index = coerce_index_path(index_path)
     try:
@@ -113,22 +126,39 @@ def classify(
                 matched_era=_entry_era(crc32_index[hashes.crc32]), hash_kind="crc32", issues=tuple(issues),
             )
 
-    try:
-        match = fuzzy_title_match(title, era, resolved_index, threshold=threshold)
-    except IndexUnavailable as exc:
-        if strict:
-            raise
-        return _index_unchecked(path, computed_sha1, exc)
-    if match is not None:
-        matched_title, similarity = match
+    match: TitleMatch | None = None
+    if era:
+        try:
+            matches = fuzzy_title_match(
+                title, index_path=resolved_index, threshold=threshold, limit=_TITLE_CANDIDATES,
+            )
+        except IndexUnavailable as exc:
+            if strict:
+                raise
+            return _index_unchecked(path, computed_sha1, exc)
+        match = _best_title_match(matches, era)
+    if match is not None and match.era == era:
         return ClassifyResult(
-            status="mismatch", computed_sha1=computed_sha1, matched_title=matched_title, similarity=similarity,
+            status="mismatch", computed_sha1=computed_sha1, matched_title=match.title, similarity=match.score,
             reason=(
-                f"title '{title}' is a {similarity:.0%} match for indexed title "
-                f"'{matched_title}', but no hash from this file matches any entry for it"
+                f"title '{title}' is a {match.score:.0%} match for indexed title "
+                f"'{match.title}', but no hash from this file matches any entry for it"
             ),
-            # fuzzy_title_match() only searches titles whose entry era == era.
             matched_era=era, issues=tuple(issues),
+        )
+    if match is not None:
+        wrong_era = one_line(
+            f"best title match '{match.title}' is in era '{match.era}', not the supplied era '{era}'", limit=200,
+        )
+        issues.append(Issue(IssueCode.WRONG_ERA, wrong_era))
+        return ClassifyResult(
+            status="mismatch", computed_sha1=computed_sha1, matched_title=match.title, similarity=match.score,
+            reason=(
+                f"title '{title}' is a {match.score:.0%} match for indexed title "
+                f"'{match.title}' in era '{match.era}', outside the supplied era '{era}', "
+                "and no hash from this file matches any entry"
+            ),
+            matched_era=match.era, issues=tuple(issues),
         )
 
     return ClassifyResult(
@@ -147,6 +177,20 @@ def _index_unchecked(path: Path, computed_sha1: str, exc: IndexUnavailable) -> C
         status="unchecked", computed_sha1=computed_sha1, matched_title=None, similarity=None,
         reason=reason, issues=(Issue(INDEX_UNAVAILABLE, reason),),
     )
+
+
+def _best_title_match(matches: list[TitleMatch], era: str) -> TitleMatch | None:
+    """The best of *matches* (sorted best first), preferring *era* among the
+    candidates tied at the top score. None when there are no matches."""
+    if not matches:
+        return None
+    top = matches[0].score
+    for candidate in matches:
+        if candidate.score < top:
+            break
+        if candidate.era == era:
+            return candidate
+    return matches[0]
 
 
 def _entry_era(entry: object) -> str | None:

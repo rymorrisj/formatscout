@@ -148,9 +148,9 @@ class TestResolutionOrder:
     def test_title_match_resolves_its_own_index_path(self, tmp_path: Path, monkeypatch):
         monkeypatch.setenv(INDEX_PATH_ENV, str(fx.write_synthetic_index(tmp_path)))
 
-        match = fuzzy_title_match(fx.TITLE_QUERY_ABOVE_THRESHOLD, "ps1")
+        matches = fuzzy_title_match(fx.TITLE_QUERY_ABOVE_THRESHOLD, eras=["ps1"])
 
-        assert match is not None and match[0] == fx.TITLE_MATCH_INDEXED_TITLE
+        assert matches and (matches[0].era, matches[0].title) == ("ps1", fx.TITLE_MATCH_INDEXED_TITLE)
 
     def test_detect_rejects_a_malformed_index_path_argument(self, tmp_path: Path):
         with pytest.raises(ValueError):
