@@ -25,3 +25,5 @@ htmlcov/
 .DS_Store
 
 formatscout/hashing/hash_index.json
+
+.claude/
