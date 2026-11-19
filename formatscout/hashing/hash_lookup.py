@@ -663,8 +663,8 @@ def _move_no_overwrite(src: Path, dst: Path) -> None:
 def forget_index(path: Path) -> None:
     """Drop everything cached in this process about the index at *path*: the
     parsed index, the title tables built from it and the once-per-file-version
-    provenance verdicts. The next
-    load re-parses and re-checks. Documented internal API (used by index.py)."""
+    provenance verdicts. The next load re-parses and re-checks. Documented
+    internal API (used by index.py)."""
     with _index_lock:
         _index_cache.pop(path, None)
     # list() snapshots the keys in one step, so another thread adding a key

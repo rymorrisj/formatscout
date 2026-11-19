@@ -91,8 +91,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is reconciled with the CHD tags like an md5 or crc32 hit (agreement is
   corroboration, disagreement keeps the tag result with `CONFLICTING_EVIDENCE`,
   no tag result is a weak 0.45 guess), and the container always comes from the
-  tags. A filename-only title match now scores 0.40 (was 0.5), below any
-  result read from the file's bytes with an era.
+  tags. A filename-only title match now scores 0.40 (was 0.5) and a lone crc32
+  hit is 0.35; both are non-authoritative guesses.
+- A CHD header `rawsha1` claim is corroboration only. It never raises the
+  confidence or status the tags alone produced: agreeing with a GD-ROM tag
+  keeps the 0.85 guess, and naming one of a CD or DVD tag's candidates leaves
+  the result `container_only` with no era. Every such claim adds
+  `CLAIM_UNVERIFIED`. The filename-title step now runs after the claim is
+  reconciled, so a claim (agreeing, within the candidates, or contradicting
+  the tags) no longer switches it off. A CHD result without a recognised tag
+  never carries an era from any other source, such as the logical size.
+- `ISO PVD read error` reasons name only the exception class, not its message.
 - `classify()` reports a CHD header `rawsha1` hit as `caution` with the issue
   `CLAIM_UNVERIFIED` instead of `verified`: the header is not checked against
   the image data. `Method.TITLE_MATCH` and the `IssueCode` enum
@@ -103,7 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ~88 MB index per path. A different index path (or a rebuilt file) replaces
   it only once the new file has parsed, so a failed load keeps the working
   entry; the cost is that two parsed indexes are alive at once while a
-  replacement loads. The title cache likewise keeps one index entry, with one
+  replacement loads. The parsed index is cached only when its mtime and size
+  did not change while it loaded. The title cache likewise keeps one index entry, with one
   table per requested era, is stored only when the index file did not change
   while it loaded, is cleared by `forget_index`, and both are guarded by a
   lock.

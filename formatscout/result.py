@@ -144,7 +144,9 @@ class IssueCode(StrEnum):
     HASH_WEAK: the era came from an md5 or crc32 hit alone, with no
         corroborating structural evidence.
     CONFLICTING_EVIDENCE: a hash hit named a different era than the structure.
-    WRONG_ERA: the best title match lies outside the era that was supplied.
+    WRONG_ERA: classify()'s title fallback searched the supplied era first,
+        found no match there at or above the threshold, and found one in
+        another era.
     AMBIGUOUS_CONTAINER: several candidate eras matched the title of a
         container whose platform could not be read.
     UNSUPPORTED_LAYOUT: a recognised container layout this package does not
