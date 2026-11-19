@@ -474,15 +474,13 @@ class TestDetectFromPvdSystemCnf:
 
 # ---------------------------------------------------------------------------
 # detect_iso, dispatch order: detect_from_magic -> detect_from_pvd ->
-# xbox_image.detect_xbox_image_type -> size fallback.
+# xbox_image.probe_xbox_image (XDVDFS) -> ambiguous PVD -> size fallback.
 #
-# detect_xbox_image_type(path) takes a single path argument and returns one
-# of exactly four strings: "xiso", "dvd_rip", "iso9660", "unknown". detect_iso()
-# branches on only the first two ("xiso" -> era=xbox 0.9; "dvd_rip" -> era=xbox
-# 0.9 plus requires_extraction=True). "iso9660" and "unknown" are both
-# unhandled by detect_iso() and fall through to _iso_size_fallback(), so the
-# size-fallback tests below are parametrized over both rather than assuming
-# only one of them reaches that tier.
+# With no XDVDFS layout (probe_xbox_image() returns None), the size fallback
+# is reached either with the ISO 9660 magic confirmed
+# (xbox_image.has_iso9660_magic() True, "iso9660" below) or without it
+# ("unknown" below), so the size-fallback tests are parametrized over both.
+# No size rule ever names an Xbox era.
 #
 # NOTE: magic_signatures.toml has zero signatures with "iso" in applies_to
 # today, so detect_from_magic(path, "iso") can never return a non-None era
@@ -490,9 +488,15 @@ class TestDetectFromPvdSystemCnf:
 # (dependency injection on the wiring), not a real magic-byte fixture.
 # ---------------------------------------------------------------------------
 
-# The two detect_xbox_image_type() return values detect_iso() does not
-# special-case, both of which must reach _iso_size_fallback().
 NON_XBOX_IMAGE_TYPES = ("iso9660", "unknown")
+
+
+def _no_xbox_layout(monkeypatch, image_type: str) -> None:
+    """No XDVDFS layout; the ISO 9660 magic is present only for "iso9660"."""
+    from formatscout import iso_detect
+
+    monkeypatch.setattr(iso_detect, "probe_xbox_image", lambda path: None)
+    monkeypatch.setattr(iso_detect, "has_iso9660_magic", lambda path: image_type == "iso9660")
 
 
 class TestDetectIso:
@@ -533,56 +537,17 @@ class TestDetectIso:
         assert result.status == Status.AMBIGUOUS
         assert [c.era for c in result.candidates] == ["ps1", "ps2"]
 
-    def test_falls_through_to_xbox_image_type_when_no_pvd_signal(self, tmp_path: Path, monkeypatch):
-        """detect_xbox_image_type() == "xiso": a ready-to-use Original Xbox
-        disc image. requires_extraction must stay False, only the dvd_rip
-        branch below sets it.
+    def test_iso9660_over_4gib_is_not_an_xbox_rip(self, tmp_path: Path):
+        """The removed "CD001 plus over 4 GiB is an Xbox DVD rip" rule: an
+        ISO 9660 image that size with no other signal has no era and does
+        not require extraction. Nothing mocked.
+
+        Layout: "CD001" at 0x8001 (byte 0x8000 left zero so detect_from_pvd()
+        sees no valid PVD type code), nothing at any XDVDFS offset, and a
+        sparse-truncated size past 4 GiB.
         """
         from formatscout import iso_detect
-
-        monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
-        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: "xiso")
-        iso_path = tmp_path / "game.iso"
-        iso_path.write_bytes(b"\x00" * 100)  # no valid PVD
-
-        result = iso_detect.detect_iso(iso_path)
-        assert result.era == "xbox"
-        assert result.confidence == 0.9
-        assert "XDVDFS" in result.reason
-        assert result.requires_extraction is False
-
-    def test_dvd_rip_sets_requires_extraction(self, tmp_path: Path, monkeypatch):
-        """detect_xbox_image_type() == "dvd_rip": ISO 9660 magic present but
-        the file is past the xISO size threshold, a raw Xbox DVD rip. Same
-        era/confidence as the xiso branch, distinguished only by
-        requires_extraction=True, the signal that extract-xiso must run
-        before the image is usable.
-        """
-        from formatscout import iso_detect
-
-        monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
-        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: "dvd_rip")
-        iso_path = tmp_path / "game.iso"
-        iso_path.write_bytes(b"\x00" * 100)  # no valid PVD
-
-        result = iso_detect.detect_iso(iso_path)
-        assert result.era == "xbox"
-        assert result.confidence == 0.9
-        assert result.requires_extraction is True
-        assert "raw Xbox DVD rip" in result.reason
-
-    def test_real_dvd_rip_image_resolves_end_to_end(self, tmp_path: Path):
-        """The same dvd_rip outcome with nothing mocked at all, the only test
-        that exercises the real iso_detect -> xbox_image wiring rather than a
-        monkeypatched stand-in for it.
-
-        Layout: "CD001" at 0x8001 (the ISO 9660 standard identifier, which
-        also leaves byte 0x8000 zero so detect_from_pvd() sees no valid PVD
-        type code and falls through), nothing at 0x10000 so the XDVDFS magic
-        check misses, and a sparse-truncated size past xbox_image's
-        4,294,967,296-byte (binary 4 GiB) dvd_rip threshold.
-        """
-        from formatscout import iso_detect
+        from formatscout.result import Status
 
         iso_path = tmp_path / "game.iso"
         with iso_path.open("wb") as fh:
@@ -591,16 +556,211 @@ class TestDetectIso:
             fh.truncate(4_400_000_000)
 
         result = iso_detect.detect_iso(iso_path)
-        assert result.era == "xbox"
-        assert result.confidence == 0.9
+        assert result.era is None
+        assert result.requires_extraction is False
+        assert result.status == Status.AMBIGUOUS
+        assert result.container == "iso9660"
+
+
+# ---------------------------------------------------------------------------
+# detect_iso, XDVDFS (xbox_image.probe_xbox_image): xISO at 0x10000 told
+# apart by DEFAULT.XBE / DEFAULT.XEX, other XGD layouts unsupported.
+# Built with tests/builders/xdvdfs.py (UNVERIFIED against real media).
+# ---------------------------------------------------------------------------
+
+def _write_xdvdfs(tmp_path: Path, executable: str = "DEFAULT.XBE", **kwargs) -> Path:
+    from formatscout.tests.builders.xdvdfs import build_xdvdfs
+
+    path = tmp_path / "game.iso"
+    path.write_bytes(build_xdvdfs(executable, **kwargs).data)
+    return path
+
+
+class TestDetectIsoXdvdfs:
+    def _call(self, path: Path):
+        from formatscout.iso_detect import detect_iso
+        return detect_iso(path)
+
+    @pytest.mark.parametrize("executable, era", [("DEFAULT.XBE", "xbox"), ("DEFAULT.XEX", "xbox360")])
+    def test_default_executable_names_the_era(self, tmp_path: Path, executable: str, era: str):
+        from formatscout.result import Method, Status
+
+        result = self._call(_write_xdvdfs(tmp_path, executable, extra_files={"MEDIA.BIN": b"m"}))
+        assert result.era == era
+        assert result.method == Method.MAGIC
+        assert result.status == Status.GUESS
+        assert result.authoritative is False
+        assert result.container == "xdvdfs"
+        assert result.requires_extraction is False
+        assert f"xdvdfs_root_{executable.lower().replace('.', '_')}" in result.evidence
+
+    def test_lowercase_root_name_still_matches(self, tmp_path: Path):
+        result = self._call(_write_xdvdfs(tmp_path, "default.xex"))
+        assert result.era == "xbox360"
+
+    @pytest.mark.parametrize(
+        "executable, extra",
+        [("GAME.XBE", {}), ("DEFAULT.XBE", {"DEFAULT.XEX": b"XEX2"})],
+        ids=["neither", "both"],
+    )
+    def test_no_single_default_executable_is_container_only(self, tmp_path: Path, executable: str, extra: dict):
+        from formatscout.result import Status
+
+        result = self._call(_write_xdvdfs(tmp_path, executable, extra_files=extra))
+        assert result.era is None
+        assert result.status == Status.CONTAINER_ONLY
+        assert result.container == "xdvdfs"
+        assert [c.era for c in result.candidates] == ["xbox", "xbox360"]
+        assert result.requires_extraction is False
+
+    def test_magic_with_zero_root_fields_is_ambiguous(self, tmp_path: Path):
+        from formatscout.result import Status
+        from formatscout.tests.builders.xdvdfs import build_xdvdfs
+
+        image = build_xdvdfs("DEFAULT.XBE")
+        data = bytearray(image.data)
+        data[image.magic_offset + 20:image.magic_offset + 28] = bytes(8)
+        path = tmp_path / "game.iso"
+        path.write_bytes(bytes(data))
+
+        result = self._call(path)
+        assert result.era is None
+        assert result.status == Status.AMBIGUOUS
+        assert result.container is None
+        assert result.requires_extraction is False
+
+    @pytest.mark.parametrize("cut", ["before_root", "mid_root"])
+    def test_truncated_image_never_names_an_era(self, tmp_path: Path, cut: str):
+        from formatscout.tests.builders.xdvdfs import build_xdvdfs
+
+        image = build_xdvdfs("DEFAULT.XBE")
+        end = image.root_offset if cut == "before_root" else image.root_offset + 8
+        path = tmp_path / "game.iso"
+        path.write_bytes(image.data[:end])
+        assert self._call(path).era is None
+
+    def test_xgd_partition_layout_is_unsupported(self, tmp_path: Path):
+        """Magic plus usable root fields past an XGD partition offset: the
+        layout is recognised but not parsed. Sparse file, nothing mocked."""
+        from formatscout.result import IssueCode, Status
+        from formatscout.tests.builders.xdvdfs import build_xdvdfs
+        from formatscout.xbox_image import XDVDFS_DESCRIPTOR_OFFSET, XGD_PARTITION_OFFSETS
+
+        layout, partition = XGD_PARTITION_OFFSETS[-1]
+        image = build_xdvdfs("DEFAULT.XEX")
+        path = tmp_path / "game.iso"
+        with path.open("wb") as fh:
+            fh.seek(partition)
+            fh.write(image.data)
+        assert image.magic_offset == XDVDFS_DESCRIPTOR_OFFSET
+
+        result = self._call(path)
+        assert result.era is None
+        assert result.status == Status.CONTAINER_ONLY
+        assert result.container == "xdvdfs"
+        assert [c.era for c in result.candidates] == ["xbox", "xbox360"]
+        assert [issue.code for issue in result.issues] == [IssueCode.UNSUPPORTED_LAYOUT]
+        assert f"{layout}_partition" in result.evidence
         assert result.requires_extraction is True
 
+    def test_xgd_magic_without_root_fields_does_not_require_extraction(self, tmp_path: Path, monkeypatch):
+        from formatscout import iso_detect
+        from formatscout.xbox_image import XboxProbe
+
+        monkeypatch.setattr(iso_detect, "probe_xbox_image", lambda path: XboxProbe("xgd2", 0x0FD90000, False))
+        path = tmp_path / "game.iso"
+        path.write_bytes(b"\x00" * 100)
+        result = self._call(path)
+        assert result.era is None
+        assert result.requires_extraction is False
+
+
+# ---------------------------------------------------------------------------
+# xbox_image._walk_root_names: the XDVDFS root-directory tree walk must stay
+# bounded on hostile tables (cycles, deep chains, huge entry counts).
+# ---------------------------------------------------------------------------
+
+def _xdvdfs_entry(left: int, right: int, name: bytes) -> bytes:
+    import struct
+
+    body = struct.pack("<HHIIBB", left, right, 40, 1, 0x20, len(name)) + name
+    return body + b"\xff" * (-len(body) % 4)
+
+
+class TestXdvdfsRootWalk:
+    def _call(self, table: bytes):
+        from formatscout.xbox_image import _walk_root_names
+        return _walk_root_names(table)
+
+    def test_self_and_mutual_cycles_terminate(self):
+        # E0 -> E1 (right); E1 -> itself (left) and E2 (right); E2 -> E1 (left).
+        off1 = len(_xdvdfs_entry(0, 0, b"DEFAULT.XBE"))
+        off2 = off1 + len(_xdvdfs_entry(0, 0, b"B.BIN"))
+        table = (
+            _xdvdfs_entry(0, off1 // 4, b"DEFAULT.XBE")
+            + _xdvdfs_entry(off1 // 4, off2 // 4, b"B.BIN")
+            + _xdvdfs_entry(off1 // 4, 0, b"C.BIN")
+        )
+        names, truncated = self._call(table)
+        assert names == {"DEFAULT.XBE", "B.BIN", "C.BIN"}
+        assert truncated is False
+
+    def test_child_offset_past_the_table_is_ignored(self):
+        names, _ = self._call(_xdvdfs_entry(0x7FFF, 0x1234, b"DEFAULT.XEX"))
+        assert names == {"DEFAULT.XEX"}
+
+    def test_padding_and_short_tables_yield_nothing(self):
+        assert self._call(b"\xff" * 2048) == (frozenset(), False)
+        assert self._call(b"") == (frozenset(), False)
+        assert self._call(b"\x00" * 10) == (frozenset(), False)
+
+    def test_name_running_past_the_table_is_skipped(self):
+        entry = _xdvdfs_entry(0, 0, b"DEFAULT.XBE")
+        assert self._call(entry[:16]) == (frozenset(), False)
+
+    def test_depth_cap_stops_a_long_chain(self):
+        from formatscout.xbox_image import XDVDFS_MAX_DEPTH
+
+        count = XDVDFS_MAX_DEPTH + 10
+        size = len(_xdvdfs_entry(0, 0, b"F0000.BIN"))
+        table = b"".join(
+            _xdvdfs_entry(0, ((i + 1) * size) // 4 if i + 1 < count else 0, f"F{i:04d}.BIN".encode())
+            for i in range(count)
+        )
+        names, truncated = self._call(table)
+        assert truncated is True
+        assert len(names) == XDVDFS_MAX_DEPTH + 1
+
+    def test_entry_cap_bounds_a_wide_tree(self):
+        from formatscout.xbox_image import XDVDFS_MAX_ENTRIES
+
+        # Every entry links to the next two: a tree far wider than the cap.
+        count = XDVDFS_MAX_ENTRIES + 50
+        size = len(_xdvdfs_entry(0, 0, b"F00000.B"))
+        table = b"".join(
+            _xdvdfs_entry(
+                ((2 * i + 1) * size) // 4 if 2 * i + 1 < count else 0,
+                ((2 * i + 2) * size) // 4 if 2 * i + 2 < count else 0,
+                f"F{i:05d}.B".encode(),
+            )
+            for i in range(count)
+        )
+        names, truncated = self._call(table)
+        assert truncated is True
+        assert len(names) == XDVDFS_MAX_ENTRIES
+
+
+# ---------------------------------------------------------------------------
+# detect_iso, size fallback with no XDVDFS layout (see _no_xbox_layout).
+# ---------------------------------------------------------------------------
+
+class TestDetectIsoSizeFallback:
     @pytest.mark.parametrize("image_type", NON_XBOX_IMAGE_TYPES)
     def test_falls_through_to_size_fallback_over_4gb(self, tmp_path: Path, monkeypatch, image_type: str):
         from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
-        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: image_type)
+        _no_xbox_layout(monkeypatch, image_type)
         iso_path = tmp_path / "game.iso"
         iso_path.touch()
         os.truncate(iso_path, 5_000_000_000)
@@ -616,7 +776,7 @@ class TestDetectIso:
         from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
-        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: image_type)
+        _no_xbox_layout(monkeypatch, image_type)
         iso_path = tmp_path / "game.iso"
         iso_path.touch()
         os.truncate(iso_path, 500 * 1024 * 1024)
@@ -634,7 +794,7 @@ class TestDetectIso:
         from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
-        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: "unknown")
+        _no_xbox_layout(monkeypatch, "unknown")
         iso_path = tmp_path / "game.iso"
         iso_path.touch()
         os.truncate(iso_path, 1_000_000_000)
@@ -655,7 +815,7 @@ class TestDetectIso:
         from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
-        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: "iso9660")
+        _no_xbox_layout(monkeypatch, "iso9660")
         iso_path = tmp_path / "game.iso"
         iso_path.touch()
         os.truncate(iso_path, 1_000_000_000)
@@ -678,7 +838,7 @@ class TestDetectIso:
         from formatscout import iso_detect
 
         monkeypatch.setattr(iso_detect, "detect_from_magic", lambda path, extension: (None, ""))
-        monkeypatch.setattr(iso_detect, "detect_xbox_image_type", lambda path: image_type)
+        _no_xbox_layout(monkeypatch, image_type)
         iso_path = tmp_path / "game.iso"
         iso_path.touch()
         os.truncate(iso_path, 500 * 1024 * 1024)
@@ -786,10 +946,155 @@ class TestDetectCue:
 
 
 # ---------------------------------------------------------------------------
-# detect_chd, thin delegation to validators.chd_validator.detect_chd_platform().
-# Full CHD parsing logic already covered by test_chd_validator.py; this only
-# confirms the wiring.
+# detect_chd, delegation to validators.chd_validator.detect_chd_platform()
+# plus the CHD contract mapping (iso_detect._reconcile_chd_result). Full CHD
+# parsing logic is covered by test_chd_validator.py; these confirm the wiring
+# and the mapping from both the current validator result shape and the
+# contract shape the validator is moving to.
 # ---------------------------------------------------------------------------
+
+def _fake_chd(monkeypatch, result):
+    from formatscout.validators import chd_validator
+
+    monkeypatch.setattr(chd_validator, "detect_chd_platform", lambda path: result)
+
+
+def _chd_scan(**kwargs):
+    from formatscout.result import ScanResult
+
+    base = dict(title=None, platform=None, era=None, confidence=0.0, reason="validator")
+    base.update(kwargs)
+    return ScanResult(**base)
+
+
+class TestDetectChdContract:
+    def _call(self, tmp_path: Path):
+        from formatscout.iso_detect import detect_chd
+
+        path = tmp_path / "game.chd"
+        path.write_bytes(b"\x00")
+        return detect_chd(path)
+
+    @pytest.mark.parametrize("logical_size_era", ["ps1", "ps2"])
+    def test_current_cd_size_guess_becomes_chd_cd_candidates(self, tmp_path: Path, monkeypatch, logical_size_era):
+        """The validator's CHTR/CHT2 logical-size era guess is dropped."""
+        from formatscout.result import Method, Status
+
+        _fake_chd(monkeypatch, _chd_scan(
+            era=logical_size_era, confidence=0.3, warnings=["not authoritative: size heuristic"],
+            method=Method.SIZE_HEURISTIC, container="chd", evidence=("chd_meta_chtr_cht2", "chd_logical_size"),
+        ))
+        result = self._call(tmp_path)
+        assert result.era is None
+        assert result.status == Status.CONTAINER_ONLY
+        assert result.method == Method.STRUCTURAL
+        assert result.container == "chd_cd"
+        assert [c.era for c in result.candidates] == ["ps1", "ps2"]
+        assert "chd_logical_size" not in result.evidence
+        assert not any("size heuristic" in w for w in result.warnings)
+
+    @pytest.mark.parametrize(
+        "evidence, container, eras",
+        [
+            (("chd_meta_cht2",), "chd_cd", ["ps1", "ps2"]),
+            (("chd_meta_chtr",), "chd_cd", ["ps1", "ps2"]),
+            (("chd_meta_chcd",), "chd_cd", ["ps1", "ps2"]),
+            (("chd_meta_dvd",), "chd_dvd", ["ps2", "xbox", "xbox360"]),
+        ],
+    )
+    def test_tag_evidence_maps_to_container_and_candidates(
+        self, tmp_path: Path, monkeypatch, evidence, container, eras,
+    ):
+        from formatscout.result import Method, Status
+
+        _fake_chd(monkeypatch, _chd_scan(
+            status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container="chd", evidence=evidence,
+        ))
+        result = self._call(tmp_path)
+        assert result.era is None
+        assert result.status == Status.CONTAINER_ONLY
+        assert result.container == container
+        assert [c.era for c in result.candidates] == eras
+
+    @pytest.mark.parametrize("evidence", [("chd_meta_chgd",), ("chd_meta_chgt",)])
+    def test_gd_rom_tag_is_dreamcast_guess(self, tmp_path: Path, monkeypatch, evidence):
+        from formatscout.result import Method, Status
+
+        _fake_chd(monkeypatch, _chd_scan(
+            status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container="chd", evidence=evidence,
+        ))
+        result = self._call(tmp_path)
+        assert result.era == "dreamcast"
+        assert result.status == Status.GUESS
+        assert result.authoritative is False
+        assert result.container == "chd_gd"
+
+    def test_contract_shaped_result_is_passed_through(self, tmp_path: Path, monkeypatch):
+        from formatscout.result import Candidate, Method, Status, Tier
+
+        already = _chd_scan(
+            status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container="chd_dvd",
+            candidates=(Candidate("ps2", Tier.WEAK), Candidate("xbox", Tier.WEAK), Candidate("xbox360", Tier.WEAK)),
+        )
+        _fake_chd(monkeypatch, already)
+        assert self._call(tmp_path) is already
+
+    def test_version_unsupported_never_carries_an_era(self, tmp_path: Path, monkeypatch):
+        from formatscout.result import Issue, IssueCode, Method
+
+        _fake_chd(monkeypatch, _chd_scan(
+            era="dreamcast", confidence=0.85, method=Method.STRUCTURAL, container="chd",
+            evidence=("chd_meta_chgd",), issues=(Issue(IssueCode.CHD_VERSION_UNSUPPORTED, "v4"),),
+        ))
+        result = self._call(tmp_path)
+        assert result.era is None
+        assert [i.code for i in result.issues] == [IssueCode.CHD_VERSION_UNSUPPORTED]
+
+    def test_era_less_version_unsupported_is_passed_through(self, tmp_path: Path, monkeypatch):
+        from formatscout.result import Issue, IssueCode, Method, Status
+
+        already = _chd_scan(
+            status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container="chd",
+            issues=(Issue(IssueCode.CHD_VERSION_UNSUPPORTED, "v4"),),
+        )
+        _fake_chd(monkeypatch, already)
+        assert self._call(tmp_path) is already
+
+    def test_size_era_without_a_tag_is_dropped(self, tmp_path: Path, monkeypatch):
+        from formatscout.result import Method
+
+        _fake_chd(monkeypatch, _chd_scan(
+            era="ps2", confidence=0.3, method=Method.SIZE_HEURISTIC, container="chd", evidence=("chd_logical_size",),
+        ))
+        result = self._call(tmp_path)
+        assert result.era is None
+        assert result.container == "chd"
+
+    @pytest.mark.parametrize("logical_bytes", [0, 664_710_336, 4_400_000_000])
+    def test_real_cht2_chd_end_to_end_has_no_size_era(self, tmp_path: Path, logical_bytes: int):
+        """Through the real validator, whatever shape it returns: a CHT2 CHD
+        is chd_cd with candidates ps1/ps2 at every declared logical size."""
+        from formatscout.iso_detect import detect_chd
+        from formatscout.tests.builders import chd
+
+        path = tmp_path / "game.chd"
+        path.write_bytes(chd.build_chd(version=5, metadata=(chd.track_entry(chd.TAG_CHT2),), logical_bytes=logical_bytes).data)
+        result = detect_chd(path)
+        assert result.era is None
+        assert result.container == "chd_cd"
+        assert [c.era for c in result.candidates] == ["ps1", "ps2"]
+
+    def test_real_chgd_chd_end_to_end_is_chd_gd(self, tmp_path: Path):
+        from formatscout.iso_detect import detect_chd
+        from formatscout.tests.builders import chd
+
+        path = tmp_path / "game.chd"
+        path.write_bytes(chd.build_chd(version=5, metadata=(chd.track_entry(chd.TAG_CHGD, track_type="MODE1_RAW"),)).data)
+        result = detect_chd(path)
+        assert result.era == "dreamcast"
+        assert result.authoritative is False
+        assert result.container == "chd_gd"
+
 
 class TestDetectChd:
     def test_delegates_to_chd_validator_detect_chd_platform(self, tmp_path: Path, monkeypatch):

@@ -7,7 +7,11 @@ link points to the next name in sorted order). The default executable is
 DEFAULT.XBE (original Xbox) or DEFAULT.XEX (Xbox 360).
 
 Real XGD images put this structure at a partition offset behind a video
-partition; this builder uses offset 0, which is the layout formatscout reads.
+partition; this builder uses offset 0, which is the layout formatscout reads
+(write the image at an XGD partition offset to exercise the unsupported-layout
+path). UNVERIFIED against real media: the descriptor fields, the directory
+entry layout and the 4-byte child-offset units are the same unverified
+description xbox_image.py parses.
 """
 
 import struct

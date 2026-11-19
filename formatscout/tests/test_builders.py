@@ -31,7 +31,7 @@ def _iter_records(dir_data: bytes) -> dict:
 class TestCookedIso:
     def test_round_trip_structure_and_files(self, tmp_path: Path):
         from formatscout import iso_detect
-        from formatscout.xbox_image import detect_xbox_image_type
+        from formatscout.xbox_image import has_iso9660_magic, probe_xbox_image
 
         image = build_iso(
             FILES, volume_id="FSTEST_VOL", system_id="FSTEST_SYS",
@@ -40,7 +40,8 @@ class TestCookedIso:
         path = tmp_path / "t.iso"
         path.write_bytes(image)
 
-        assert detect_xbox_image_type(path) == "iso9660"
+        assert has_iso9660_magic(path)
+        assert probe_xbox_image(path) is None
 
         pvd = image[16 * 2048:17 * 2048]
         assert pvd[1:6] == b"CD001"

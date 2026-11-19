@@ -375,17 +375,25 @@ class TestIsoSites:
         result = iso_detect.detect_iso(_write(tmp_path / "g.iso", b"\x00" * 100))
         _tags(result, Method.SYSTEM_CNF, Status.GUESS, False)
 
-    def test_xdvdfs_is_magic_guess(self, tmp_path: Path):
-        result = iso_detect.detect_iso(_write(tmp_path / "g.iso", xdvdfs.build_xdvdfs("DEFAULT.XBE").data))
-        assert result.era == "xbox"
+    @pytest.mark.parametrize("executable, era", [("DEFAULT.XBE", "xbox"), ("DEFAULT.XEX", "xbox360")])
+    def test_xdvdfs_is_magic_guess(self, tmp_path: Path, executable: str, era: str):
+        result = iso_detect.detect_iso(_write(tmp_path / "g.iso", xdvdfs.build_xdvdfs(executable).data))
+        assert result.era == era
         _tags(result, Method.MAGIC, Status.GUESS, False)
         assert result.container == "xdvdfs"
+        assert not result.requires_extraction
 
-    def test_dvd_rip_is_size_guess(self, tmp_path: Path):
+    def test_xdvdfs_without_default_executable_is_container_only(self, tmp_path: Path):
+        result = iso_detect.detect_iso(_write(tmp_path / "g.iso", xdvdfs.build_xdvdfs("GAME.XBE").data))
+        _tags(result, Method.MAGIC, Status.CONTAINER_ONLY, False)
+        assert result.container == "xdvdfs"
+        assert [c.era for c in result.candidates] == ["xbox", "xbox360"]
+
+    def test_iso9660_over_4gib_is_not_an_xbox_rip(self, tmp_path: Path):
         path = write_sparse(tmp_path / "g.iso", build_iso({"README.TXT": b"x"}, volume_id="FSDVD"), 4_400_000_000)
         result = iso_detect.detect_iso(path)
-        assert result.era == "xbox" and result.requires_extraction
-        _tags(result, Method.SIZE_HEURISTIC, Status.GUESS, False)
+        assert result.era is None and not result.requires_extraction
+        _tags(result, Method.SIZE_HEURISTIC, Status.AMBIGUOUS, False)
         assert result.container == "iso9660"
 
     def test_cue_without_bin_is_no_signal(self, tmp_path: Path):

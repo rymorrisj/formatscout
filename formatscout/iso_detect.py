@@ -12,9 +12,18 @@ from .constants import (
 from .iso9660_dir import DirRecord, iter_dir_records
 from .utils.pointer_file import read_capped_lines
 from .utils.safe_path import rejection_warning, resolve_pointer
-from .xbox_image import detect_xbox_image_type
+from .xbox_image import has_iso9660_magic, probe_xbox_image
 from .magic.magic_detect import SYSTEM_CNF_READ_CAP_BYTES, classify_system_cnf, detect_from_magic, magic_tags
-from .result import Candidate, Issue, Method, ScanResult, Status, null_scan_result, tier_for_confidence
+from .result import (
+    Candidate,
+    Issue,
+    IssueCode,
+    Method,
+    ScanResult,
+    Status,
+    null_scan_result,
+    tier_for_confidence,
+)
 from .validators import bin_validator
 from .validators import chd_validator
 
@@ -45,22 +54,9 @@ def detect_iso(path: Path) -> ScanResult:
     if pvd.era is not None:
         return pvd
 
-    xbox_kind = detect_xbox_image_type(path)
-    if xbox_kind == "xiso":
-        return ScanResult(
-            title=None, platform=None, era="xbox", confidence=0.9,
-            reason="XDVDFS magic 'MICROSOFT*XBOX*MEDIA' found at 0x10000, Original Xbox disc image",
-            # Not authoritative: Xbox 360 discs use the same XDVDFS magic.
-            method=Method.MAGIC, authoritative=False, container="xdvdfs", evidence=("xdvdfs_magic",),
-        )
-    if xbox_kind == "dvd_rip":
-        return ScanResult(
-            title=None, platform=None, era="xbox", confidence=0.9,
-            reason="ISO 9660 magic found but file exceeds the xISO size threshold, raw Xbox DVD rip",
-            requires_extraction=True,
-            method=Method.SIZE_HEURISTIC, authoritative=False, container="iso9660",
-            evidence=("iso9660_magic", "size_over_dvd_threshold"),
-        )
+    xbox = _detect_xbox(path)
+    if xbox is not None:
+        return xbox
 
     # A PlayStation-shaped PVD with no readable SYSTEM.CNF key is ambiguous
     # (candidates ps1/ps2). That is still more than the size fallback below
@@ -68,11 +64,96 @@ def detect_iso(path: Path) -> ScanResult:
     if pvd.status is Status.AMBIGUOUS:
         return pvd
 
-    # "iso9660" means the ISO 9660 magic was found and the file is not an Xbox
-    # image. That is a real signal even though it names no platform, so it is
-    # passed down rather than discarded: it separates "a genuine disc image we
-    # cannot attribute" from "bytes that are not a recognisable image at all".
-    return _iso_size_fallback(path, iso9660_confirmed=(xbox_kind == "iso9660"))
+    # The ISO 9660 magic with no Xbox layout is a real signal even though it
+    # names no platform (at any size: an ISO 9660 image over 4 GiB is not
+    # an Xbox rip by size alone), so it is passed down rather than
+    # discarded: it separates "a genuine disc image we cannot attribute"
+    # from "bytes that are not a recognisable image at all".
+    return _iso_size_fallback(path, iso9660_confirmed=has_iso9660_magic(path))
+
+
+_XBOX_CANDIDATE_ERAS = ("xbox", "xbox360")
+# Root entries that name the platform on an XDVDFS volume. UNVERIFIED that
+# every real disc carries exactly one of them in the root directory.
+_XDVDFS_DEFAULT_EXECUTABLES = (("DEFAULT.XBE", "xbox", "Original Xbox"), ("DEFAULT.XEX", "xbox360", "Xbox 360"))
+
+
+def _xbox_candidates(evidence: tuple[str, ...]) -> tuple[Candidate, ...]:
+    return tuple(Candidate(era, tier_for_confidence(0.5), evidence) for era in _XBOX_CANDIDATE_ERAS)
+
+
+def _detect_xbox(path: Path) -> ScanResult | None:
+    """XDVDFS results for detect_iso(), or None when no XDVDFS magic was
+    found at any recognised offset (see xbox_image.probe_xbox_image).
+
+    xISO layout (descriptor at 0x10000): DEFAULT.XBE in the root is xbox,
+    DEFAULT.XEX is xbox360, neither (or both) is container_only with
+    candidates xbox and xbox360. Never authoritative: a root file name only,
+    the executable's contents are not checked. requires_extraction stays
+    False, an xISO is directly usable.
+
+    Full XGD layouts (magic past a game-partition offset) are not parsed:
+    container_only, candidates xbox and xbox360, issue UNSUPPORTED_LAYOUT.
+    requires_extraction is set only when the descriptor's root fields are
+    also usable, i.e. XDVDFS is positively identified, never from size.
+
+    Magic with unusable root fields at 0x10000 is ambiguous, not a
+    confirmed container.
+    """
+    probe = probe_xbox_image(path)
+    if probe is None:
+        return None
+
+    if probe.layout != "xiso":
+        evidence = ("xdvdfs_magic", f"{probe.layout}_partition")
+        message = (
+            f"XDVDFS volume found at the {probe.layout.upper()} game partition "
+            f"(offset {probe.partition_offset:#x}), a layout this package does not parse"
+        )
+        return ScanResult(
+            title=None, platform=None, era=None, confidence=0.5,
+            reason=f"{message}; Original Xbox and Xbox 360 cannot be told apart",
+            warnings=["full Xbox/Xbox 360 disc image layout, select Xbox or Xbox 360 manually"],
+            requires_extraction=probe.descriptor_valid,
+            status=Status.CONTAINER_ONLY, method=Method.MAGIC, container="xdvdfs",
+            evidence=evidence, candidates=_xbox_candidates(evidence),
+            issues=(Issue(IssueCode.UNSUPPORTED_LAYOUT, message),),
+        )
+
+    if not probe.descriptor_valid:
+        evidence = ("xdvdfs_magic", "xdvdfs_descriptor_invalid")
+        return ScanResult(
+            title=None, platform=None, era=None, confidence=0.3,
+            reason="XDVDFS magic found at 0x10000 but the volume descriptor's root directory fields are unusable",
+            warnings=["XDVDFS magic without a readable root directory, select Xbox or Xbox 360 manually"],
+            status=Status.AMBIGUOUS, method=Method.MAGIC,
+            evidence=evidence, candidates=_xbox_candidates(evidence),
+        )
+
+    found = [entry for entry in _XDVDFS_DEFAULT_EXECUTABLES if entry[0] in probe.root_names]
+    if len(found) == 1:
+        name, era, label = found[0]
+        return ScanResult(
+            title=None, platform=None, era=era, confidence=0.9,
+            reason=f"XDVDFS volume at 0x10000 with {name} in its root directory, {label} disc image",
+            # Not authoritative: a root file name only, its contents are not checked.
+            method=Method.MAGIC, authoritative=False, container="xdvdfs",
+            evidence=("xdvdfs_magic", f"xdvdfs_root_{name.lower().replace('.', '_')}"),
+        )
+
+    evidence = ("xdvdfs_magic", "xdvdfs_root_default_executable_" + ("both" if found else "missing"))
+    if probe.walk_truncated:
+        evidence += ("xdvdfs_root_walk_truncated",)
+    return ScanResult(
+        title=None, platform=None, era=None, confidence=0.5,
+        reason=(
+            "XDVDFS volume at 0x10000, but its root directory holds "
+            + ("both DEFAULT.XBE and DEFAULT.XEX" if found else "neither DEFAULT.XBE nor DEFAULT.XEX")
+        ),
+        warnings=["Xbox disc image whose platform could not be read, select Xbox or Xbox 360 manually"],
+        status=Status.CONTAINER_ONLY, method=Method.MAGIC, container="xdvdfs",
+        evidence=evidence, candidates=_xbox_candidates(evidence),
+    )
 
 
 def detect_cue(path: Path, dir_cache: dict[Path, list[Path]] | None = None) -> ScanResult:
@@ -128,8 +209,116 @@ def _detect_cue(
     return bin_validator.resolve_bin_cue(bin_path, dir_cache)
 
 
+# ── CHD ──────────────────────────────────────────────────────────────────────
+#
+# detect_chd() maps chd_validator.detect_chd_platform()'s result onto the
+# CHD contract below. It reads nothing itself, it only inspects the
+# validator's ScanResult:
+#   - result.container already "chd_cd" / "chd_dvd" / "chd_gd", or
+#   - one of the tag evidence codes below in result.evidence
+#     ("chd_meta_chtr_cht2" is the code the validator emits today), and
+#   - an Issue with code IssueCode.CHD_VERSION_UNSUPPORTED for a non-v5
+#     header.
+#
+# Contract:
+#   CHT2 / CHTR / CHCD tag -> era None, container_only, container "chd_cd",
+#                             candidates ps1, ps2
+#   DVD tag                -> era None, container_only, container "chd_dvd",
+#                             candidates ps2, xbox, xbox360
+#   CHGD / CHGT tag        -> era dreamcast, guess (not authoritative: Sega
+#                             NAOMI GD-ROMs share the tag), container "chd_gd"
+#   non-v5 header          -> era None, the validator's issue passed through
+# No era is ever derived from the CHD logical size.
+
+_CHD_TAG_EVIDENCE: dict[str, frozenset[str]] = {
+    "chd_gd": frozenset({"chd_meta_chgd", "chd_meta_chgt"}),
+    "chd_dvd": frozenset({"chd_meta_dvd"}),
+    "chd_cd": frozenset({"chd_meta_chtr_cht2", "chd_meta_chtr", "chd_meta_cht2", "chd_meta_chcd"}),
+}
+_CHD_CANDIDATE_ERAS: dict[str, tuple[str, ...]] = {
+    "chd_cd": ("ps1", "ps2"),
+    "chd_dvd": ("ps2", "xbox", "xbox360"),
+}
+_CHD_SIZE_EVIDENCE = "chd_logical_size"
+
+
 def detect_chd(path: Path) -> ScanResult:
-    return chd_validator.detect_chd_platform(path)
+    return _reconcile_chd_result(chd_validator.detect_chd_platform(path))
+
+
+def _chd_media_container(result: ScanResult) -> str | None:
+    """"chd_cd", "chd_dvd" or "chd_gd" from the validator's container or tag
+    evidence; None when neither names a track tag. GD wins over DVD over CD
+    when several codes are present."""
+    if result.container in _CHD_TAG_EVIDENCE:
+        return result.container
+    evidence = set(result.evidence)
+    for container, codes in _CHD_TAG_EVIDENCE.items():
+        if evidence & codes:
+            return container
+    return None
+
+
+def _reconcile_chd_result(result: ScanResult) -> ScanResult:
+    """Apply the CHD contract above to a validator result. Results that
+    already follow it, and results it does not cover (no CHD magic, read
+    errors, no recognised tag), are returned unchanged."""
+    version_unsupported = any(issue.code == IssueCode.CHD_VERSION_UNSUPPORTED for issue in result.issues)
+    if version_unsupported:
+        if result.era is None:
+            return result
+        return ScanResult(
+            title=None, platform=None, era=None, confidence=0.0, reason=result.reason,
+            warnings=list(result.warnings), status=Status.UNSUPPORTED, method=Method.STRUCTURAL,
+            container=result.container, evidence=result.evidence, issues=result.issues,
+        )
+
+    container = _chd_media_container(result)
+    evidence = tuple(code for code in result.evidence if code != _CHD_SIZE_EVIDENCE)
+    # Warnings written for a size-based era guess no longer apply once the
+    # era is dropped; an era-less validator result keeps its own warnings.
+    carried_warnings = list(result.warnings) if result.era is None else []
+
+    if container == "chd_gd":
+        was_dreamcast = result.era == "dreamcast"
+        if was_dreamcast and result.status is Status.GUESS and result.container == container:
+            return result
+        return ScanResult(
+            title=None, platform=None, era="dreamcast",
+            confidence=result.confidence if was_dreamcast else 0.85,
+            reason=result.reason if was_dreamcast else "CHD metadata GD-ROM track tag (CHGD/CHGT) indicates Dreamcast",
+            warnings=list(result.warnings) if was_dreamcast else carried_warnings,
+            # Not authoritative: Sega NAOMI GD-ROM images carry the same tag.
+            status=Status.GUESS, method=Method.STRUCTURAL, authoritative=False, container=container,
+            evidence=evidence, issues=result.issues,
+        )
+
+    if container in _CHD_CANDIDATE_ERAS:
+        if (
+            result.era is None and result.status is Status.CONTAINER_ONLY
+            and result.container == container and result.candidates
+        ):
+            return result
+        eras = _CHD_CANDIDATE_ERAS[container]
+        media = "CD" if container == "chd_cd" else "DVD"
+        return ScanResult(
+            title=None, platform=None, era=None, confidence=0.3,
+            reason=f"CHD metadata {media} track tag confirms a {media} image but names no platform",
+            warnings=carried_warnings or [f"CHD {media} image, could be {', '.join(eras)}, select the era manually"],
+            status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container=container,
+            evidence=evidence, issues=result.issues,
+            candidates=tuple(Candidate(era, tier_for_confidence(0.3), evidence) for era in eras),
+        )
+
+    if result.era is not None and result.method is Method.SIZE_HEURISTIC:
+        # No recognised tag but an era from size: never allowed for a CHD.
+        return ScanResult(
+            title=None, platform=None, era=None, confidence=0.0,
+            reason="CHD container detected; logical size names no platform",
+            status=Status.CONTAINER_ONLY, method=Method.STRUCTURAL, container=result.container or "chd",
+            evidence=evidence, issues=result.issues,
+        )
+    return result
 
 
 # ── ISO 9660 PVD ─────────────────────────────────────────────────────────────
@@ -346,8 +535,9 @@ def _iso_size_fallback(path: Path, *, iso9660_confirmed: bool = False) -> ScanRe
     """Lowest tier: nothing named a platform, so decide what little can be said
     from file size alone.
 
-    iso9660_confirmed means detect_xbox_image_type() found the ISO 9660 magic
-    and ruled out both Xbox shapes. era stays None either way, because a
+    iso9660_confirmed means xbox_image.has_iso9660_magic() found the ISO 9660
+    magic and detect_iso() found no XDVDFS layout. era stays None either way
+    and at every size (the size only lists candidates), because a
     filesystem signature identifies the container, not the platform, and
     guessing one here would be a fabrication. What it does change is that the
     result is no longer reported as "no signal found": a confirmed ISO 9660
@@ -374,8 +564,9 @@ def _iso_size_fallback(path: Path, *, iso9660_confirmed: bool = False) -> ScanRe
     else:
         status, method, container, evidence = Status.NO_SIGNAL, Method.NONE, None, ()
     if size > DVD_SIZE_THRESHOLD_BYTES:
-        # The size names two candidates. Reached only unconfirmed in
-        # detect_iso(): a confirmed ISO 9660 image this size is a dvd_rip.
+        # The size names two candidates and no era, confirmed ISO 9660 or
+        # not: an ISO 9660 image over 4 GiB is not an Xbox rip by size alone
+        # (ordinary PC DVDs are this size too).
         size_evidence = evidence + ("size_over_dvd_threshold",)
         return ScanResult(
             title=None, platform=None, era=None, confidence=0.2,
