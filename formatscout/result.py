@@ -64,6 +64,9 @@ class Method(StrEnum):
     pe_header: MZ/PE header fields of an executable.
     extension: file extension alone.
     size_heuristic: a file or logical size threshold decided the result.
+    title_match: an exact normalized filename-title match against the hash
+        index, scoped to the candidate eras of a container (used for CHDs,
+        whose raw bytes cannot be hash-matched). Never authoritative.
     none: no rule produced a signal (no_signal and error results).
     """
     HASH_SHA1 = "hash_sha1"
@@ -77,6 +80,7 @@ class Method(StrEnum):
     PE_HEADER = "pe_header"
     EXTENSION = "extension"
     SIZE_HEURISTIC = "size_heuristic"
+    TITLE_MATCH = "title_match"
     NONE = "none"
 
 
@@ -127,6 +131,33 @@ class Issue(NamedTuple):
     Complements the free-text warnings list, which is unchanged."""
     code: str
     message: str
+
+
+class IssueCode(StrEnum):
+    """Issue codes introduced with the correctness batch. A StrEnum, so each
+    member compares equal to its uppercase string value and can be passed
+    anywhere an Issue code string is expected. Older codes (INDEX_UNAVAILABLE,
+    POINTER_REJECTED, ...) remain plain strings.
+
+    CLAIM_UNVERIFIED: the result rests on a claim that was not checked against
+        the data (a CHD header rawsha1 hit).
+    HASH_WEAK: the era came from an md5 or crc32 hit alone, with no
+        corroborating structural evidence.
+    CONFLICTING_EVIDENCE: a hash hit named a different era than the structure.
+    WRONG_ERA: the best title match lies outside the era that was supplied.
+    AMBIGUOUS_CONTAINER: several candidate eras matched the title of a
+        container whose platform could not be read.
+    UNSUPPORTED_LAYOUT: a recognised container layout this package does not
+        parse.
+    CHD_VERSION_UNSUPPORTED: a CHD header version other than 5.
+    """
+    CLAIM_UNVERIFIED = "CLAIM_UNVERIFIED"
+    HASH_WEAK = "HASH_WEAK"
+    CONFLICTING_EVIDENCE = "CONFLICTING_EVIDENCE"
+    WRONG_ERA = "WRONG_ERA"
+    AMBIGUOUS_CONTAINER = "AMBIGUOUS_CONTAINER"
+    UNSUPPORTED_LAYOUT = "UNSUPPORTED_LAYOUT"
+    CHD_VERSION_UNSUPPORTED = "CHD_VERSION_UNSUPPORTED"
 
 
 _ERA_STATUSES = frozenset({Status.IDENTIFIED, Status.GUESS})
@@ -301,13 +332,15 @@ class ClassifyResult:
     classification from scratch, used both at ingest and on a manual re-check.
 
     status:
-        "verified", sha1 (or, for a CHD container, its embedded rawsha1)
-            exactly matches a hash_index.json entry. Highest confidence, the
-            only state that should ever read as a positive confirmation. For
-            a CHD, the rawsha1 is read from the header and is not checked
-            against the image data.
-        "caution", no sha1 match, but md5 or crc32 exactly matches an entry.
-            Real index coverage, weaker confidence than a sha1 hit.
+        "verified", the file's own sha1 exactly matches a hash_index.json
+            entry. Highest confidence, the only state that should ever read
+            as a positive confirmation. A CHD never reaches it: a CHD's
+            header rawsha1 is a claim that is not checked against the image
+            data, so that hit is "caution".
+        "caution", a weaker hit: either the sha1 of a CHD's header rawsha1
+            matched (hash_kind "chd_rawsha1", issue CLAIM_UNVERIFIED), or no
+            sha1 matched but md5 or crc32 exactly matches an entry. Real
+            index coverage, weaker confidence than a verified sha1 hit.
         "mismatch", no hash of any kind matched, but the title is an
             approximate (>=threshold) match for a title that does exist in
             hash_index.json. Expected to happen often against an inherently
@@ -352,7 +385,9 @@ class ClassifyResult:
     issues: Issue(code, message) tuples: "HASH_FAILED" or "INDEX_UNAVAILABLE"
         for "unchecked", "INDEX_MISSING" when a missing custom index file was
         treated as empty, "CHD_RAWSHA1_MISSING" when a .chd had no usable
-        embedded rawsha1 and its raw file sha1 was looked up instead.
+        embedded rawsha1 and its raw file sha1 was looked up instead,
+        "CLAIM_UNVERIFIED" on a CHD header rawsha1 hit, and "WRONG_ERA" on a
+        "mismatch" whose best title match lies outside the supplied era.
     """
     status: Literal["verified", "caution", "mismatch", "not_in_index", "unchecked"]
     computed_sha1: str | None

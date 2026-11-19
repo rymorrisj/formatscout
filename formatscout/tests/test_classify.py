@@ -104,7 +104,7 @@ class TestDispatchStates:
 # ---------------------------------------------------------------------------
 
 class TestChdCarveOut:
-    def test_verified_via_embedded_rawsha1(self, tmp_path: Path, monkeypatch):
+    def test_caution_via_embedded_rawsha1_claim(self, tmp_path: Path, monkeypatch):
         index_path = fx.write_synthetic_index(tmp_path)
         fx.patch_classify_index(monkeypatch, index_path)
 
@@ -113,7 +113,10 @@ class TestChdCarveOut:
 
         result = _classify(chd_file, title="irrelevant for this tier", era="dreamcast")
 
-        assert result.status == "verified"
+        # A header rawsha1 is an unchecked claim: caution, never verified.
+        assert result.status == "caution"
+        assert result.hash_kind == "chd_rawsha1"
+        assert [issue.code for issue in result.issues] == ["CLAIM_UNVERIFIED"]
         # computed_sha1 is the file's own real hash, never the embedded one.
         assert result.computed_sha1 != fx.CHD_EMBEDDED_SHA1
 

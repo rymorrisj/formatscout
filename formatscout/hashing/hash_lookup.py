@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -92,12 +93,17 @@ _QUARANTINE_SLOTS = 6
 
 # The parsed index of the one path used most recently: {index_path: (mtime,
 # sha1_index, md5_index, crc32_index)}. Holds at most ONE entry, because a parsed
-# real index is ~88MB on disk and several times that as Python objects; loading
-# a different path (or a changed mtime) evicts the previous entry before the new
-# file is parsed. Keyed by mtime so a rebuilt hash_index.json (via build_index.py)
-# is picked up without a restart. Alternating between two index paths therefore
-# re-parses on every switch; use one path per process for the hot path.
+# real index is ~88MB on disk and several times that as Python objects. The
+# previous entry is kept until its replacement has parsed successfully and is
+# dropped only then, so a failed or oversized load never costs the entry that
+# still works; the price is that two parsed indexes are alive at once while a
+# replacement parses (peak memory is about twice one parsed index). Keyed by
+# mtime so a rebuilt hash_index.json (via build_index.py) is picked up without
+# a restart. Alternating between two index paths re-parses on every switch; use
+# one path per process for the hot path. Guarded by _index_lock, which is held
+# across the parse so concurrent callers parse a given file once, not per thread.
 _index_cache: dict[Path, tuple[float, dict, dict, dict]] = {}
+_index_lock = threading.RLock()
 
 
 # The 0.1.3/0.1.4 private names, kept as aliases of the public exceptions in
@@ -515,8 +521,9 @@ def lookup(path: Path, index_path: Path) -> ScanResult | None:
     Three descending tiers, each with its own confidence:
 
       sha1  (1.0)  Cryptographic digest. Treat a hit as identification.
-      md5   (0.85) Broken against deliberate collisions. A chance
-                   collision on real dump data is not a practical concern.
+      md5   (0.85) Broken against deliberate collisions, and the index
+                   stores no file sizes yet, so a chance collision cannot be
+                   ruled out. Corroboration, not proof.
       crc32 (0.75) NOT a cryptographic digest. A 32-bit error-detection
                    checksum, not a hash: collisions exist by the
                    pigeonhole principle at ~2**32 inputs and can be
@@ -655,7 +662,8 @@ def forget_index(path: Path) -> None:
     """Drop everything cached in this process about the index at *path*: the
     parsed index and the once-per-file-version provenance verdicts. The next
     load re-parses and re-checks. Documented internal API (used by index.py)."""
-    _index_cache.pop(path, None)
+    with _index_lock:
+        _index_cache.pop(path, None)
     # list() snapshots the keys in one step, so another thread adding a key
     # meanwhile cannot raise "dictionary changed size during iteration".
     for key in [k for k in list(_verified_default) if k[0] == path]:
@@ -768,49 +776,49 @@ def _cache_provenance_ok(path: Path, stat: os.stat_result, recorded: tuple[str, 
 
 def _parse_index(index_path: Path) -> tuple[dict, dict, dict]:
     """mtime-cached parse of *index_path* into (sha1, md5, crc32) indices.
-    The cache holds one entry (see _index_cache): parsing a different path
-    evicts the previous one.
+    The cache holds one entry (see _index_cache): a different path or a
+    changed mtime replaces it, but only once the new file has parsed, so a
+    failure leaves the previous entry in place.
 
     Refuses files over _MAX_INDEX_BYTES before json.load(). Raises
     IndexIntegrityError for an oversized, non-JSON, or malformed file.
     """
-    stat = index_path.stat()
-    mtime = stat.st_mtime
-    cached = _index_cache.get(index_path)
-    if cached is not None and cached[0] == mtime:
-        return cached[1], cached[2], cached[3]
+    with _index_lock:
+        stat = index_path.stat()
+        mtime = stat.st_mtime
+        cached = _index_cache.get(index_path)
+        if cached is not None and cached[0] == mtime:
+            return cached[1], cached[2], cached[3]
 
-    if stat.st_size > _MAX_INDEX_BYTES:
-        raise IndexIntegrityError(
-            f"index file is {stat.st_size} bytes, over the {_MAX_INDEX_BYTES} byte limit"
-        )
+        if stat.st_size > _MAX_INDEX_BYTES:
+            raise IndexIntegrityError(
+                f"index file is {stat.st_size} bytes, over the {_MAX_INDEX_BYTES} byte limit"
+            )
 
-    # Evict before parsing, not after storing, so two parsed indexes are never
-    # alive at once (a failed parse then also leaves the cache empty, never stale).
-    _index_cache.clear()
+        try:
+            with index_path.open("r", encoding="utf-8") as fh:
+                index = json.load(fh)
+        except (ValueError, RecursionError) as exc:  # JSONDecodeError, UnicodeDecodeError
+            raise IndexIntegrityError(f"index file is not valid JSON ({exc})") from exc
+        if not isinstance(index, dict):
+            raise IndexIntegrityError("index file is not a JSON object")
 
-    try:
-        with index_path.open("r", encoding="utf-8") as fh:
-            index = json.load(fh)
-    except (ValueError, RecursionError) as exc:  # JSONDecodeError, UnicodeDecodeError
-        raise IndexIntegrityError(f"index file is not valid JSON ({exc})") from exc
-    if not isinstance(index, dict):
-        raise IndexIntegrityError("index file is not a JSON object")
+        md5_index: dict[str, dict] = {}
+        crc32_index: dict[str, dict] = {}
+        for entry in index.values():
+            if not isinstance(entry, dict):
+                raise IndexIntegrityError("index file has a non-object entry")
+            md5 = entry.get("md5")
+            if md5 and md5 not in md5_index:
+                md5_index[md5] = entry
+            crc32 = entry.get("crc32")
+            if crc32 and crc32 not in crc32_index:
+                crc32_index[crc32] = entry
 
-    md5_index: dict[str, dict] = {}
-    crc32_index: dict[str, dict] = {}
-    for entry in index.values():
-        if not isinstance(entry, dict):
-            raise IndexIntegrityError("index file has a non-object entry")
-        md5 = entry.get("md5")
-        if md5 and md5 not in md5_index:
-            md5_index[md5] = entry
-        crc32 = entry.get("crc32")
-        if crc32 and crc32 not in crc32_index:
-            crc32_index[crc32] = entry
-
-    _index_cache[index_path] = (mtime, index, md5_index, crc32_index)
-    return index, md5_index, crc32_index
+        # Replace only now that the new index is complete and valid.
+        _index_cache.clear()
+        _index_cache[index_path] = (mtime, index, md5_index, crc32_index)
+        return index, md5_index, crc32_index
 
 
 def _prepare_default_index(path: Path, fetch_opts: dict[str, Any] | None = None) -> tuple[bool, bool]:
@@ -875,8 +883,8 @@ def _load_default_index(path: Path, fetch_opts: dict[str, Any] | None = None) ->
         if not managed:
             raise IndexIntegrityError(
                 f"{exc}; {path} has no download record so it is treated as "
-                "user-supplied and was left in place: fix it, or delete it to "
-                "download the pinned index"
+                "user-supplied and was left in place: fix it, or delete it and "
+                "retry to download the pinned index"
             ) from exc
         _quarantine(path)
         if fresh:
@@ -981,8 +989,17 @@ def validate_index_file(
             if value is not None
         }
         try:
-            _prepare_default_index(index_path, fetch_opts)
-            _check_readable_within_cap(index_path)
+            managed, _fresh = _prepare_default_index(index_path, fetch_opts)
+            try:
+                _check_readable_within_cap(index_path)
+            except IndexIntegrityError as exc:
+                if managed:
+                    raise
+                raise IndexIntegrityError(
+                    f"{exc}; {index_path} has no download record so it is treated as "
+                    "user-supplied and was left in place: fix it, or delete it and "
+                    "retry to download the pinned index"
+                ) from exc
         except IndexUnavailable:
             raise
         except FileNotFoundError as exc:

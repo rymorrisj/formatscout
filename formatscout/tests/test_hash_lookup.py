@@ -210,7 +210,7 @@ class TestLoadIndexMtimeCache:
 
         assert list(hash_lookup._index_cache) == [index_path]
 
-    def test_failed_parse_of_another_path_leaves_no_stale_entry(self, tmp_path: Path):
+    def test_failed_parse_of_another_path_keeps_the_working_entry(self, tmp_path: Path):
         hash_lookup = _hash_lookup_module()
         (tmp_path / "a").mkdir()
         good = fx.write_synthetic_index(tmp_path / "a")
@@ -224,7 +224,8 @@ class TestLoadIndexMtimeCache:
         with pytest.raises(hash_lookup.IndexIntegrityError):
             hash_lookup.load_index(bad)
 
-        assert hash_lookup._index_cache == {}
+        # The entry that still works is kept until a replacement loads.
+        assert list(hash_lookup._index_cache) == [good]
 
     def test_forget_index_is_safe_for_cached_and_unknown_paths(self, tmp_path: Path):
         hash_lookup = _hash_lookup_module()

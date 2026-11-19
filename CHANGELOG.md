@@ -45,9 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reason are unchanged). See the README's Result contract section.
 
 ### Changed
-- The in-process parsed-index cache keeps at most one entry: loading a
-  different index path (or a rebuilt file) evicts the previous parsed index
-  before parsing, instead of retaining one ~88 MB index per path.
+- `classify()` reports a CHD header `rawsha1` hit as `caution` with the issue
+  `CLAIM_UNVERIFIED` instead of `verified`: the header is not checked against
+  the image data. `Method.TITLE_MATCH` and the `IssueCode` enum
+  (`CLAIM_UNVERIFIED`, `HASH_WEAK`, `CONFLICTING_EVIDENCE`, `WRONG_ERA`,
+  `AMBIGUOUS_CONTAINER`, `UNSUPPORTED_LAYOUT`, `CHD_VERSION_UNSUPPORTED`) are
+  new.
+- The in-process parsed-index cache keeps at most one entry, instead of one
+  ~88 MB index per path. A different index path (or a rebuilt file) replaces
+  it only once the new file has parsed, so a failed load keeps the working
+  entry; the cost is that two parsed indexes are alive at once while a
+  replacement loads. The title cache likewise keeps one entry, and both are
+  guarded by a lock.
 - `classify()` and `verify()` no longer raise by default when the index is
   unavailable (offline mode, backoff, failed download, oversized, corrupt or
   unreadable index). They return `status="unchecked"` with an

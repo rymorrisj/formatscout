@@ -683,7 +683,8 @@ class TestClassifyFields:
         fx.patch_classify_index(monkeypatch, fx.write_synthetic_index(tmp_path))
         chd = _write(tmp_path / "g.chd", fx.build_synthetic_chd(fx.CHD_EMBEDDED_SHA1))
         result = _classify(chd, "x", "dreamcast")
-        assert (result.status, result.hash_kind, result.matched_era) == ("verified", "chd_rawsha1", "dreamcast")
+        assert (result.status, result.hash_kind, result.matched_era) == ("caution", "chd_rawsha1", "dreamcast")
+        assert [issue.code for issue in result.issues] == ["CLAIM_UNVERIFIED"]
 
     def test_chd_without_rawsha1_records_issue(self, tmp_path: Path, monkeypatch):
         fx.patch_classify_index(monkeypatch, fx.write_synthetic_index(tmp_path))

@@ -4,7 +4,7 @@ from .hashing import hash_lookup as _hash_lookup
 from .hashing.title_match import fuzzy_title_match
 from .index_errors import INDEX_UNAVAILABLE, IndexUnavailable
 from .index_path import coerce_index_path, resolve_index_path
-from .result import ClassifyResult, HashKind, Issue
+from .result import ClassifyResult, HashKind, Issue, IssueCode
 from .utils.text import one_line
 from .validators.chd_validator import extract_embedded_sha1
 
@@ -81,6 +81,18 @@ def classify(
             ))
 
     if lookup_sha1 in index:
+        if sha1_kind == "chd_rawsha1":
+            # The header rawsha1 is a forgeable claim, never checked against
+            # the hunks, so it cannot read as a verification.
+            issues.append(Issue(
+                IssueCode.CLAIM_UNVERIFIED,
+                "the CHD header rawsha1 matched an index entry but was not checked against the image data",
+            ))
+            return ClassifyResult(
+                status="caution", computed_sha1=computed_sha1, matched_title=None, similarity=None,
+                reason=f"CHD header rawsha1 claim matches an index entry (unverified): {lookup_sha1}",
+                matched_era=_entry_era(index[lookup_sha1]), hash_kind=sha1_kind, issues=tuple(issues),
+            )
         return ClassifyResult(
             status="verified", computed_sha1=computed_sha1, matched_title=None, similarity=None,
             reason=f"sha1 match: {lookup_sha1}",

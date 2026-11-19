@@ -1,4 +1,5 @@
 import re
+import threading
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -11,10 +12,14 @@ from . import hash_lookup as _hash_lookup
 # drag the similarity ratio down for an otherwise-exact title.
 _BRACKETED_RE = re.compile(r"[\(\[][^\)\]]*[\)\]]")
 
-# Cached per (index_path, era): (mtime, [(normalized_title, original_title), ...]).
-# Reuses hash_lookup.load_index's own mtime-keyed cache for the raw index,
-# this only adds the era-filtered, normalized, de-duplicated title list on top.
-_title_cache: dict[tuple[Path, str], tuple[float, list[tuple[str, str]]]] = {}
+# The normalized, de-duplicated title lists of the one index used most
+# recently: (index_path, mtime, {era: [(normalized_title, original_title), ...]}),
+# or None. Built for every era in one pass over the index (which
+# hash_lookup.load_index keeps in its own single-entry cache). One entry only,
+# replaced once the new table is complete, never evicted beforehand, so a failed
+# load keeps the working table. Guarded by _title_lock.
+_title_cache: tuple[Path, float, dict[str, list[tuple[str, str]]]] | None = None
+_title_lock = threading.Lock()
 
 
 def _normalize_title(title: str) -> str:
@@ -23,6 +28,7 @@ def _normalize_title(title: str) -> str:
 
 
 def _titles_for_era(era: str, index_path: Path) -> list[tuple[str, str]]:
+    global _title_cache
     try:
         index, _md5_index, _crc32_index = _hash_lookup.load_index(index_path)
     except FileNotFoundError:
@@ -34,27 +40,31 @@ def _titles_for_era(era: str, index_path: Path) -> list[tuple[str, str]]:
         mtime: float | None = index_path.stat().st_mtime
     except OSError:
         # Replaced or removed since load_index() returned: use the index
-        # already in hand, just without caching the title list.
+        # already in hand, just without caching the title table.
         mtime = None
-    key = (index_path, era)
-    cached = _title_cache.get(key)
-    if mtime is not None and cached is not None and cached[0] == mtime:
-        return cached[1]
 
-    seen: set[str] = set()
-    titles: list[tuple[str, str]] = []
-    for entry in index.values():
-        if entry.get("era") != era:
-            continue
-        original = entry.get("title")
-        if not original or original in seen:
-            continue
-        seen.add(original)
-        titles.append((_normalize_title(original), original))
+    with _title_lock:
+        cached = _title_cache
+        if mtime is not None and cached is not None and cached[0] == index_path and cached[1] == mtime:
+            return cached[2].get(era, [])
 
-    if mtime is not None:
-        _title_cache[key] = (mtime, titles)
-    return titles
+        by_era: dict[str, list[tuple[str, str]]] = {}
+        seen: dict[str, set[str]] = {}
+        for entry in index.values():
+            entry_era = entry.get("era")
+            original = entry.get("title")
+            if not isinstance(entry_era, str) or not isinstance(original, str) or not original:
+                continue
+            era_seen = seen.setdefault(entry_era, set())
+            if original in era_seen:
+                continue
+            era_seen.add(original)
+            by_era.setdefault(entry_era, []).append((_normalize_title(original), original))
+
+        # Replace only now that the whole table has been built.
+        if mtime is not None:
+            _title_cache = (index_path, mtime, by_era)
+        return by_era.get(era, [])
 
 
 def fuzzy_title_match(
