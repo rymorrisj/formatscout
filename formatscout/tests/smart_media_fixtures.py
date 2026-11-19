@@ -398,6 +398,7 @@ def build_pe_header(
 #
 # Field offsets mirrored from detect_from_pvd()'s own reads exactly:
 #   type code   @0            (must be 1 for a PVD)
+#   standard id @1,   5 bytes "CD001" (checked by detect_from_pvd)
 #   system_id   @8,   32 bytes
 #   volume_id   @40,  32 bytes
 #   publisher   @318, 128 bytes
@@ -442,6 +443,7 @@ def build_pvd_iso(
 
     pvd_start = _ISO_PVD_SECTOR * ISO_SECTOR
     buf[pvd_start] = 1
+    buf[pvd_start + 1:pvd_start + 6] = b"CD001"
     buf[pvd_start + 8:pvd_start + 40] = _pad_field(system_id, 32)
     buf[pvd_start + 40:pvd_start + 72] = _pad_field(volume_id, 32)
     buf[pvd_start + 318:pvd_start + 446] = _pad_field(publisher, 128)

@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from formatscout.tests import smart_media_fixtures as fx
 
 
@@ -162,6 +164,16 @@ class TestResolvePsGenerationFromFile:
         ghost = tmp_path / "does_not_exist.cnf"
         assert self._call(ghost) == "unknown"
 
+    def test_empty_file_resolves_unknown_not_ps1_default(self, tmp_path: Path):
+        cnf = tmp_path / "SYSTEM.CNF"
+        cnf.write_bytes(b"")
+        assert self._call(cnf) == "unknown"
+
+    def test_garbage_file_resolves_unknown_not_ps1_default(self, tmp_path: Path):
+        cnf = tmp_path / "SYSTEM.CNF"
+        cnf.write_bytes(b"\x00\xff garbage, no key here\r\n")
+        assert self._call(cnf) == "unknown"
+
 
 # ---------------------------------------------------------------------------
 # _resolve_ps_generation(), raw CD sector read (Part 1.2 builder)
@@ -200,15 +212,35 @@ class TestResolvePsGenerationFromSector:
         path.write_bytes(data)
         assert self._call(path) == "unknown"
 
+    def test_system_cnf_without_boot_key_resolves_unknown(self, tmp_path: Path):
+        """A readable SYSTEM.CNF with no BOOT/BOOT2 key used to be called
+        ps1. Under the strict key rule it is no signal."""
+        data = fx.build_ps_disc_bin(boot_line="VER = 1.00\r\nVMODE = NTSC\r\n")
+        path = tmp_path / "disc.bin"
+        path.write_bytes(data)
+        assert self._call(path) == "unknown"
+
+    def test_sync_plus_keyless_system_cnf_is_no_magic_hit(self, tmp_path: Path):
+        """End to end through detect_from_magic: the sync pattern plus a
+        keyless SYSTEM.CNF is not a PlayStation hit."""
+        from formatscout.magic.magic_detect import detect_from_magic
+
+        disc = bytearray(fx.build_ps_disc_bin(boot_line="garbage\r\n"))
+        sync = fx.CDROM_SYNC_AMBIGUOUS_BLOB[:12]
+        disc[0:len(sync)] = sync
+        path = tmp_path / "disc.bin"
+        path.write_bytes(bytes(disc))
+        assert detect_from_magic(path, "bin") == (None, "")
+
 
 # ---------------------------------------------------------------------------
-# _classify_system_cnf(), BOOT= vs BOOT2= distinction
+# classify_system_cnf(), strict BOOT= vs BOOT2= key match
 # ---------------------------------------------------------------------------
 
 class TestClassifySystemCnf:
     def _call(self, content: str) -> str:
-        from formatscout.magic.magic_detect import _classify_system_cnf
-        return _classify_system_cnf(content)
+        from formatscout.magic.magic_detect import classify_system_cnf
+        return classify_system_cnf(content)
 
     def test_boot_only_is_ps1(self):
         assert self._call("BOOT = cdrom:\\SLUS_000.01;1\r\nTCB = 4\r\n") == "ps1"
@@ -219,10 +251,41 @@ class TestClassifySystemCnf:
     def test_boot2_takes_priority_when_both_substrings_present(self):
         """BOOT2 contains "BOOT" as a literal substring, so content with a
         real BOOT2 line necessarily also "contains BOOT". The function must
-        still resolve ps2 (its check is specifically for the "BOOT2" token),
+        still resolve ps2 (its check is specifically for the "BOOT2" key),
         not fall to the ps1 branch because "BOOT" also matched.
         """
         assert self._call("BOOT2 = cdrom0:\\SLUS_200.01;1\r\n") == "ps2"
+
+    def test_boot2_line_wins_over_an_earlier_boot_line(self):
+        assert self._call("BOOT = cdrom:\\A;1\r\nBOOT2 = cdrom0:\\B;1\r\n") == "ps2"
+
+    def test_whitespace_around_key_is_ignored(self):
+        assert self._call("  BOOT2\t= cdrom0:\\SLUS_200.01;1\n") == "ps2"
+        assert self._call("BOOT=cdrom:\\SLUS_000.01;1") == "ps1"
+
+    def test_bare_cr_line_endings(self):
+        assert self._call("VER = 1.00\rBOOT2 = cdrom0:\\SLUS_200.01;1\r") == "ps2"
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "",
+            "   \r\n\r\n",
+            "garbage with no equals sign",
+            "BOOT2 cdrom0:\\SLUS_200.01;1",
+            "VER = BOOT2\r\n",
+            "PATH = cdrom0:\\BOOT2.ELF\r\n",
+            "XBOOT2 = cdrom0:\\SLUS_200.01;1\r\n",
+            "BOOT2X = cdrom0:\\SLUS_200.01;1\r\n",
+            "BOOTX = cdrom:\\SLUS_000.01;1\r\n",
+            "boot2 = cdrom0:\\SLUS_200.01;1\r\n",
+            "���",
+        ],
+    )
+    def test_no_boot_or_boot2_key_is_unknown(self, content: str):
+        """Strict key match: no line whose key is exactly BOOT or BOOT2
+        (case-sensitive) means "unknown", never a PS1 default."""
+        assert self._call(content) == "unknown"
 
 
 # ---------------------------------------------------------------------------

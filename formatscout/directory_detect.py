@@ -160,18 +160,21 @@ def _detect_from_directory(root: Path) -> ScanResult:
             (e for e in root.iterdir() if e.is_file() and e.name.upper() == "SYSTEM.CNF"),
             None,
         )
-        # An unreadable SYSTEM.CNF still narrows the answer to PS1 or PS2.
+        # A SYSTEM.CNF that is unreadable, or readable but has no BOOT or
+        # BOOT2 key (empty, garbage), names no era (strict key rule, see
+        # magic_detect.classify_system_cnf). Its presence still narrows the
+        # answer to PS1 or PS2.
         unread_candidates = tuple(
             Candidate(ps, tier_for_confidence(0.4), ("dir_system_cnf_unreadable",)) for ps in ("ps1", "ps2")
         )
         if cnf_path is not None:
             from .magic.magic_detect import resolve_ps_generation_from_file
             era = resolve_ps_generation_from_file(cnf_path)
-            if era == "unknown":
+            if era not in ("ps1", "ps2"):
                 return ScanResult(
                     title=None, platform=None, era=None, confidence=0.4,
-                    reason="directory contains SYSTEM.CNF but BOOT/BOOT2 key could not be read to confirm PS1 vs PS2",
-                    warnings=["SYSTEM.CNF present but unreadable, select PS1 or PS2 manually"],
+                    reason="directory contains SYSTEM.CNF but no BOOT or BOOT2 key could be read to confirm PS1 vs PS2",
+                    warnings=["SYSTEM.CNF present but has no readable BOOT/BOOT2 key, select PS1 or PS2 manually"],
                     status=Status.AMBIGUOUS, method=Method.SYSTEM_CNF,
                     evidence=("dir_system_cnf_unreadable",), candidates=unread_candidates,
                 )
@@ -179,7 +182,9 @@ def _detect_from_directory(root: Path) -> ScanResult:
             return ScanResult(
                 title=None, platform=None, era=era, confidence=0.8,
                 reason=f"directory SYSTEM.CNF {boot_key} key indicates {era.upper()}",
-                # Not authoritative: any readable SYSTEM.CNF without BOOT2 is called PS1.
+                # Not authoritative: a loose SYSTEM.CNF in a folder is not tied
+                # to a disc filesystem, any extracted tree or hand-made folder
+                # can carry one. The key itself is matched strictly.
                 method=Method.SYSTEM_CNF, authoritative=False, evidence=("dir_system_cnf",),
             )
         return ScanResult(

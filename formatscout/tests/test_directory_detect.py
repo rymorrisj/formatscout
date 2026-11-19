@@ -297,6 +297,42 @@ class TestDetectFromDirectory:
 
         assert result.era == "ps3"
 
+    def test_system_cnf_boot2_key_is_ps2(self, tmp_path: Path):
+        (tmp_path / "SYSTEM.CNF").write_bytes(b"BOOT2 = cdrom0:\\SLUS_200.62;1\r\nVER = 1.00\r\n")
+
+        result = self._call(tmp_path)
+
+        assert result.era == "ps2"
+        assert "BOOT2" in result.reason
+
+    def test_system_cnf_boot_key_is_ps1(self, tmp_path: Path):
+        (tmp_path / "SYSTEM.CNF").write_bytes(b"BOOT = cdrom:\\SLUS_000.01;1\r\nTCB = 4\r\n")
+
+        result = self._call(tmp_path)
+
+        assert result.era == "ps1"
+
+    def test_system_cnf_without_boot_key_names_no_era(self, tmp_path: Path):
+        """Strict key rule: a readable SYSTEM.CNF with no BOOT/BOOT2 key
+        (here BOOT2 appears only inside a value) used to be called ps1. It
+        now names no era, only the ps1/ps2 candidates."""
+        from formatscout.result import Status
+
+        (tmp_path / "SYSTEM.CNF").write_bytes(b"VER = BOOT2\r\nVMODE = NTSC\r\n")
+
+        result = self._call(tmp_path)
+
+        assert result.era is None
+        assert result.status == Status.AMBIGUOUS
+        assert [c.era for c in result.candidates] == ["ps1", "ps2"]
+
+    def test_empty_system_cnf_names_no_era(self, tmp_path: Path):
+        (tmp_path / "SYSTEM.CNF").write_bytes(b"")
+
+        result = self._call(tmp_path)
+
+        assert result.era is None
+
     def test_no_signal_returns_null(self, tmp_path: Path):
         # See TestDetectDirectory.test_no_signal_anywhere_returns_null: a
         # lone .txt file is not no-signal here, it hits the DOS-only root

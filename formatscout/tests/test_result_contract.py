@@ -414,8 +414,6 @@ class TestIsoSites:
             ({"volume_id": "WIN98SE"}, "win98", "pvd_volume_label_keyword"),
             ({"publisher": "ID SOFTWARE"}, "dos", "pvd_publisher_dos_publisher"),
             ({"preparer": "APOGEE"}, "dos", "pvd_preparer_dos_publisher"),
-            ({"volume_id": "SLUS_000.01"}, "ps1", "pvd_ps_serial_label"),
-            ({"system_id": "CD-ROM", "publisher": "SONY COMPUTER"}, "ps1", "pvd_sony_cdrom"),
         ],
     )
     def test_pvd_structural_sites(self, tmp_path: Path, kwargs, era, evidence):
@@ -424,11 +422,34 @@ class TestIsoSites:
         _tags(result, Method.STRUCTURAL, Status.GUESS, False)
         assert evidence in result.evidence
 
-    def test_pvd_ps2_dvd_size_is_size_guess(self, tmp_path: Path):
+    @pytest.mark.parametrize("cnf, era", [("BOOT = cdrom:\\SLUS_000.01;1", "ps1"), (PS2_BOOT_LINE, "ps2")])
+    def test_pvd_system_cnf_is_identified(self, tmp_path: Path, cnf: str, era: str):
+        path = _write(tmp_path / "g.iso", build_iso({}, system_cnf=cnf, volume_id="FSTITLE"))
+        result = iso_detect.detect_from_pvd(path)
+        assert result.era == era
+        _tags(result, Method.SYSTEM_CNF, Status.IDENTIFIED, True)
+        assert result.container == "iso9660"
+
+    @pytest.mark.parametrize(
+        "kwargs, evidence",
+        [
+            ({"volume_id": "SLUS_000.01"}, "pvd_ps_serial_label"),
+            ({"system_id": "CD-ROM", "publisher": "SONY COMPUTER"}, "pvd_sony_cdrom"),
+        ],
+    )
+    def test_pvd_playstation_hint_without_system_cnf_is_ambiguous(self, tmp_path: Path, kwargs, evidence):
+        result = iso_detect.detect_from_pvd(fx.write_pvd_iso(tmp_path / "g.iso", **kwargs))
+        assert result.era is None
+        _tags(result, Method.STRUCTURAL, Status.AMBIGUOUS, False)
+        assert [c.era for c in result.candidates] == ["ps1", "ps2"]
+        assert evidence in result.evidence
+
+    def test_pvd_ps_label_dvd_size_only_orders_candidates(self, tmp_path: Path):
         path = write_sparse(tmp_path / "g.iso", fx.build_pvd_iso(volume_id="SLUS_200.62"), 4_800_000_000)
         result = iso_detect.detect_from_pvd(path)
-        assert result.era == "ps2"
-        _tags(result, Method.SIZE_HEURISTIC, Status.GUESS, False)
+        assert result.era is None
+        _tags(result, Method.SIZE_HEURISTIC, Status.AMBIGUOUS, False)
+        assert [c.era for c in result.candidates] == ["ps2", "ps1"]
 
     def test_pvd_no_signal(self, tmp_path: Path):
         result = iso_detect.detect_from_pvd(fx.write_pvd_iso(tmp_path / "g.iso", volume_id="FSDATA"))
@@ -566,6 +587,12 @@ class TestDirectorySites:
     def test_system_cnf_unreadable_is_ambiguous(self, tmp_path: Path, monkeypatch):
         monkeypatch.setattr(magic_detect, "resolve_ps_generation_from_file", lambda path: "unknown")
         result = directory_detect.detect_directory(_dir(tmp_path / "d", {"SYSTEM.CNF": b"x"}))
+        _tags(result, Method.SYSTEM_CNF, Status.AMBIGUOUS, False)
+        assert [c.era for c in result.candidates] == ["ps1", "ps2"]
+
+    def test_system_cnf_without_boot_key_is_ambiguous(self, tmp_path: Path):
+        result = directory_detect.detect_directory(_dir(tmp_path / "d", {"SYSTEM.CNF": b"garbage, no key"}))
+        assert result.era is None
         _tags(result, Method.SYSTEM_CNF, Status.AMBIGUOUS, False)
         assert [c.era for c in result.candidates] == ["ps1", "ps2"]
 

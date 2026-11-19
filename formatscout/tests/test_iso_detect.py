@@ -278,30 +278,42 @@ class TestDetectFromPvd:
         assert result.era == "dos"
         assert "preparer" in result.reason
 
-    def test_ps1_volume_prefix_small_size(self, tmp_path: Path):
+    def test_ps_serial_label_without_system_cnf_is_ambiguous_not_ps1(self, tmp_path: Path):
+        """A serial-shaped volume label with no readable SYSTEM.CNF narrows
+        the answer to PS1 or PS2 but names neither (no PS1 default)."""
+        from formatscout.result import Status
+
         iso_path = fx.write_pvd_iso(tmp_path / "game.iso", volume_id="SLUS_123.45")
         result = self._call(iso_path)
-        assert result.era == "ps1"
-        assert result.confidence == 0.75
+        assert result.era is None
+        assert result.status == Status.AMBIGUOUS
+        assert [c.era for c in result.candidates] == ["ps1", "ps2"]
+        assert "pvd_ps_serial_label" in result.evidence
 
-    def test_ps2_volume_prefix_dvd_size(self, tmp_path: Path):
-        """Same SLES/SLUS/etc. prefix, but a file over 4.7 GB resolves to PS2
-        instead of PS1, a sparse-truncated file is used so the test doesn't
+    def test_ps_serial_label_dvd_size_only_orders_candidates(self, tmp_path: Path):
+        """Over 4.7 GB the size puts ps2 first, at a higher tier, but still
+        names no era. A sparse-truncated file is used so the test doesn't
         actually write gigabytes to disk.
         """
+        from formatscout.result import Method, Status, Tier
+
         iso_path = fx.write_pvd_iso(tmp_path / "game.iso", volume_id="SLES_123.45")
         with iso_path.open("r+b") as fh:
             fh.truncate(4_800_000_000)
         result = self._call(iso_path)
-        assert result.era == "ps2"
-        assert "DVD size" in result.reason
+        assert result.era is None
+        assert result.status == Status.AMBIGUOUS
+        assert result.method == Method.SIZE_HEURISTIC
+        assert [(c.era, c.tier) for c in result.candidates] == [("ps2", Tier.MODERATE), ("ps1", Tier.WEAK)]
+        assert "size_over_dvd5" in result.evidence
 
-    def test_sony_publisher_with_cdrom_system_id_is_ps1_regardless_of_size(self, tmp_path: Path):
-        """sys_id == 'CD-ROM' + 'SONY' in publisher resolves to ps1 even
-        without a recognised SLUS/SCES/etc. volume-label prefix, and even at
-        a large size, only a vol_starts_ps volume label triggers the PS2
-        DVD-size branch.
+    def test_sony_publisher_with_cdrom_system_id_is_ambiguous_regardless_of_size(self, tmp_path: Path):
+        """sys_id == 'CD-ROM' + 'SONY' in publisher is a PlayStation hint even
+        without a serial-shaped label, but without SYSTEM.CNF it is never
+        called ps1, at any size.
         """
+        from formatscout.result import Status
+
         iso_path = fx.write_pvd_iso(
             tmp_path / "game.iso", system_id="CD-ROM",
             publisher="SONY COMPUTER ENTERTAINMENT", volume_id="RANDOMTITLE",
@@ -309,7 +321,50 @@ class TestDetectFromPvd:
         with iso_path.open("r+b") as fh:
             fh.truncate(4_800_000_000)
         result = self._call(iso_path)
-        assert result.era == "ps1"
+        assert result.era is None
+        assert result.status == Status.AMBIGUOUS
+        assert {c.era for c in result.candidates} == {"ps1", "ps2"}
+        assert "pvd_sony_cdrom" in result.evidence
+
+    def test_stat_failure_never_defaults_to_ps1(self, tmp_path: Path, monkeypatch):
+        """The size lookup failing used to fall back to size 0 and so to ps1.
+        It now only leaves the candidate order at its default."""
+        from formatscout.result import Status
+
+        iso_path = fx.write_pvd_iso(tmp_path / "game.iso", volume_id="SCUS_942.34")
+        original_stat = Path.stat
+
+        def _stat(self, *args, **kwargs):
+            if self == iso_path:
+                raise OSError("stat failed")
+            return original_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", _stat)
+        result = self._call(iso_path)
+        assert result.era is None
+        assert result.status == Status.AMBIGUOUS
+        assert [c.era for c in result.candidates] == ["ps1", "ps2"]
+
+    def test_dos_publisher_rule_runs_after_playstation_checks(self, tmp_path: Path):
+        """A serial-shaped label wins over a DOS publisher keyword, so a
+        PlayStation disc published by e.g. Activision is not called dos."""
+        from formatscout.result import Status
+
+        iso_path = fx.write_pvd_iso(tmp_path / "game.iso", volume_id="SLUS_008.67", publisher="ACTIVISION")
+        result = self._call(iso_path)
+        assert result.era is None
+        assert result.status == Status.AMBIGUOUS
+
+    def test_type_code_1_without_cd001_returns_null(self, tmp_path: Path):
+        """Type code 1 alone is not a PVD: the standard identifier CD001 must
+        follow it."""
+        image = bytearray(fx.build_pvd_iso(volume_id="WINXP"))
+        image[16 * fx.ISO_SECTOR + 1:16 * fx.ISO_SECTOR + 6] = b"XXXXX"
+        iso_path = tmp_path / "game.iso"
+        iso_path.write_bytes(bytes(image))
+        result = self._call(iso_path)
+        assert result.era is None
+        assert result.confidence == 0.0
 
     def test_no_signal_returns_null(self, tmp_path: Path):
         iso_path = fx.write_pvd_iso(tmp_path / "game.iso", volume_id="RANDOMTITLE")
@@ -334,6 +389,87 @@ class TestDetectFromPvd:
         result = self._call(ghost)
         assert result.era is None
         assert "ISO PVD read error" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# detect_from_pvd, SYSTEM.CNF read from the ISO 9660 root (strict BOOT/BOOT2
+# key match). Built with builders.iso9660.build_iso, which stores SYSTEM.CNF
+# at a real extent the root record points to.
+# ---------------------------------------------------------------------------
+
+PS1_CNF = "BOOT = cdrom:\\SLUS_000.01;1\r\nTCB = 4\r\nEVENT = 10\r\n"
+PS2_CNF = "BOOT2 = cdrom0:\\SLUS_200.62;1\r\nVER = 1.00\r\nVMODE = NTSC\r\n"
+
+
+class TestDetectFromPvdSystemCnf:
+    def _call(self, tmp_path: Path, cnf, **kwargs):
+        from formatscout.iso_detect import detect_from_pvd
+        from formatscout.tests.builders.iso9660 import build_iso
+
+        iso_path = tmp_path / "game.iso"
+        iso_path.write_bytes(build_iso({}, system_cnf=cnf, **kwargs))
+        return detect_from_pvd(iso_path)
+
+    @pytest.mark.parametrize("cnf, era", [(PS1_CNF, "ps1"), (PS2_CNF, "ps2")])
+    @pytest.mark.parametrize("volume_id", ["FSTITLE", "SLUS_200.62"])
+    def test_boot_key_names_the_era_authoritatively(self, tmp_path: Path, cnf: str, era: str, volume_id: str):
+        """Any volume label, serial-shaped or not: the key decides, and a
+        CD-sized BOOT2 image is ps2 (no size rule)."""
+        from formatscout.result import Method, Status
+
+        result = self._call(tmp_path, cnf, volume_id=volume_id)
+        assert result.era == era
+        assert result.method == Method.SYSTEM_CNF
+        assert result.authoritative is True
+        assert result.status == Status.IDENTIFIED
+        assert result.container == "iso9660"
+        assert "pvd_root_system_cnf" in result.evidence
+
+    def test_system_cnf_wins_over_volume_label_keyword(self, tmp_path: Path):
+        result = self._call(tmp_path, PS2_CNF, volume_id="MSDOS")
+        assert result.era == "ps2"
+
+    @pytest.mark.parametrize(
+        "cnf",
+        [
+            "",
+            "garbage without any key\r\n",
+            b"\x00\x01\x02\xff",
+            "VER = BOOT2\r\n",
+            "XBOOT2 = cdrom0:\\SLUS_200.62;1\r\n",
+            "BOOTX = cdrom:\\SLUS_000.01;1\r\n",
+            "BOOT2 cdrom0:\\SLUS_200.62;1\r\n",
+        ],
+    )
+    def test_no_boot_key_names_no_era(self, tmp_path: Path, cnf: str | bytes):
+        """No BOOT or BOOT2 key (empty, garbage, the token only inside a value
+        or as part of a longer key, no "=") is no era. SYSTEM.CNF being there
+        at all still makes it a PS1-or-PS2 ambiguous result."""
+        from formatscout.result import Status
+
+        result = self._call(tmp_path, cnf, volume_id="FSTITLE")
+        assert result.era is None
+        assert result.status == Status.AMBIGUOUS
+        assert [c.era for c in result.candidates] == ["ps1", "ps2"]
+        assert "pvd_root_system_cnf_no_boot_key" in result.evidence
+
+    def test_system_cnf_record_at_lba_zero_is_not_read(self, tmp_path: Path):
+        """fx.build_pvd_iso writes root records with LBA 0, which is the
+        system area, never a file extent."""
+        from formatscout.iso_detect import detect_from_pvd
+        from formatscout.result import Status
+
+        result = detect_from_pvd(fx.write_pvd_iso(tmp_path / "game.iso", root_entries=["SYSTEM.CNF"]))
+        assert result.era is None
+        assert result.status == Status.AMBIGUOUS
+
+    def test_system_cnf_read_is_capped(self, tmp_path: Path):
+        """A BOOT2 line past the read cap is never seen."""
+        from formatscout.magic.magic_detect import SYSTEM_CNF_READ_CAP_BYTES
+
+        cnf = "VER = 1.00\r\n" * (SYSTEM_CNF_READ_CAP_BYTES // 12 + 1) + PS2_CNF
+        result = self._call(tmp_path, cnf, volume_id="FSTITLE")
+        assert result.era is None
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +520,18 @@ class TestDetectIso:
 
         result = iso_detect.detect_iso(iso_path)
         assert result.era == "winxp"
+
+    def test_ambiguous_playstation_pvd_is_returned_not_the_size_fallback(self, tmp_path: Path):
+        """A serial-shaped label without SYSTEM.CNF reaches detect_iso as an
+        ambiguous ps1/ps2 result, which must not be replaced by the weaker
+        size fallback. Nothing mocked."""
+        from formatscout import iso_detect
+        from formatscout.result import Status
+
+        result = iso_detect.detect_iso(fx.write_pvd_iso(tmp_path / "game.iso", volume_id="SLUS_123.45"))
+        assert result.era is None
+        assert result.status == Status.AMBIGUOUS
+        assert [c.era for c in result.candidates] == ["ps1", "ps2"]
 
     def test_falls_through_to_xbox_image_type_when_no_pvd_signal(self, tmp_path: Path, monkeypatch):
         """detect_xbox_image_type() == "xiso": a ready-to-use Original Xbox

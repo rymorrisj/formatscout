@@ -47,8 +47,37 @@ _SIGNATURES: list[dict] = [
 ]
 
 
-def _classify_system_cnf(content: str) -> str:
-    return "ps2" if "BOOT2" in content else "ps1"
+# SYSTEM.CNF is a few short KEY = VALUE lines. Every reader (raw Mode 2,
+# extracted file, plain ISO 9660 in iso_detect) reads at most this many bytes.
+SYSTEM_CNF_READ_CAP_BYTES = 512
+
+
+def classify_system_cnf(content: str) -> str:
+    """Classify SYSTEM.CNF text by strict key match: "ps2", "ps1" or "unknown".
+
+    Shared by every SYSTEM.CNF reader (raw Mode 2 .bin, extracted file in a
+    directory, plain ISO 9660 in iso_detect.py). Each line is split at its
+    first "=", and the key is the text before it with surrounding whitespace
+    removed, compared exactly (case-sensitive):
+
+    - a line whose key is BOOT2 means "ps2" (wins over a BOOT line);
+    - otherwise a line whose key is BOOT means "ps1";
+    - anything else (empty or garbage content, a line with no "=", a key such
+      as BOOTX or XBOOT2, BOOT2 appearing only inside a value) is "unknown".
+
+    "unknown" is no signal, never a PS1 default.
+    """
+    has_boot = False
+    for line in content.splitlines():
+        key, sep, _value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip(" \t\x00﻿")
+        if key == "BOOT2":
+            return "ps2"
+        if key == "BOOT":
+            has_boot = True
+    return "ps1" if has_boot else "unknown"
 
 
 def resolve_ps_generation_from_file(cnf_path: Path) -> str:
@@ -56,22 +85,22 @@ def resolve_ps_generation_from_file(cnf_path: Path) -> str:
     Classify PS1 vs PS2 from an already-extracted SYSTEM.CNF file on disk.
 
     Used for directory-based items: the file is directly readable, no CD
-    sector arithmetic needed. Uses the same BOOT/BOOT2 marker logic as
-    _resolve_ps_generation.
+    sector arithmetic needed. Uses the same strict key rule as every other
+    SYSTEM.CNF reader, see classify_system_cnf().
 
     Documented internal API: called from directory_detect.py, not just
     within this module, so it is not underscore-prefixed despite not being
     part of the public formatscout.__init__ surface.
 
-    Returns "ps2" if the text BOOT2 appears in the first 512 bytes, otherwise
-    "ps1". So any readable file without BOOT2 (including an empty or garbage
-    file) is reported as "ps1". Returns "unknown" only when the file cannot be
+    Reads the first SYSTEM_CNF_READ_CAP_BYTES bytes and returns "ps2" for a
+    BOOT2 key, "ps1" for a BOOT key, and "unknown" when neither key is
+    present (including an empty or garbage file) or the file cannot be
     opened or read. Callers must treat "unknown" as no signal, not as PS1.
     """
     try:
         with cnf_path.open("rb") as fh:
-            content = fh.read(512).decode("ascii", errors="replace")
-        return _classify_system_cnf(content)
+            content = fh.read(SYSTEM_CNF_READ_CAP_BYTES).decode("ascii", errors="replace")
+        return classify_system_cnf(content)
     except (OSError, struct.error, UnicodeDecodeError) as exc:
         logger.debug("Failed to read SYSTEM.CNF at %s: %s", cnf_path, exc)
         return "unknown"
@@ -108,10 +137,11 @@ def _resolve_ps_generation(path: Path) -> str:
     """Classify PS1 vs PS2 from a raw CD-ROM sector read.
 
     Returns "unknown" when the PVD, the root directory, or the SYSTEM.CNF
-    entry cannot be read or located. Once SYSTEM.CNF is read, the result is
-    "ps2" if BOOT2 appears in its text and "ps1" otherwise, so a readable
-    SYSTEM.CNF with no BOOT2 key (including an empty one) is reported as
-    "ps1". A SYSTEM.CNF entry with size 0 is read as 512 bytes.
+    entry cannot be read or located. Once SYSTEM.CNF is read, it is
+    classified by classify_system_cnf(): "ps2" for a BOOT2 key, "ps1" for a
+    BOOT key, "unknown" when neither key is present (including empty or
+    garbage content). A SYSTEM.CNF entry with size 0 is read as
+    SYSTEM_CNF_READ_CAP_BYTES bytes.
 
     The sync pattern that gates this call is a generic Mode 2 CD-ROM
     marker. It is not proof the disc is a PlayStation title. Callers must
@@ -147,9 +177,9 @@ def _resolve_ps_generation(path: Path) -> str:
                 return "unknown"
 
             raw_cnf = _read_mode2_user_data(
-                fh, system_cnf_lba, min(system_cnf_size or 512, 512),
+                fh, system_cnf_lba, min(system_cnf_size or SYSTEM_CNF_READ_CAP_BYTES, SYSTEM_CNF_READ_CAP_BYTES),
             )
-            return _classify_system_cnf(raw_cnf.decode("ascii", errors="replace"))
+            return classify_system_cnf(raw_cnf.decode("ascii", errors="replace"))
     except (OSError, struct.error, UnicodeDecodeError) as exc:
         logger.debug("Failed to resolve PS generation from raw CD sectors of %s: %s", path, exc)
         return "unknown"
@@ -198,10 +228,11 @@ def magic_tags(reason: str) -> tuple["Method", bool]:
     """(method, authoritative) for a detect_from_magic() hit, given its reason.
 
     A hit resolved through SYSTEM.CNF (the generic Mode 2 sync pattern plus
-    the BOOT/BOOT2 key) is Method.SYSTEM_CNF and not authoritative: the sync
-    pattern is not PlayStation-specific and any readable SYSTEM.CNF without
-    BOOT2 is reported as PS1. Every other hit is a platform-specific
-    signature (Dreamcast IP.BIN, N64, iNES) and is authoritative.
+    a strict BOOT/BOOT2 key match) is Method.SYSTEM_CNF and not
+    authoritative: the sync pattern that gates the read is not
+    PlayStation-specific, and the raw sector walk does not check the PVD's
+    CD001 identifier. Every other hit is a platform-specific signature
+    (Dreamcast IP.BIN, N64, iNES) and is authoritative.
 
     Callers pass the reason exactly as detect_from_magic() returned it,
     before adding any text of their own.
