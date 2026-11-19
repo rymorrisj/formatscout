@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from formatscout.tests import smart_media_fixtures as fx
+from formatscout.tests.builders.cue import build_cue
 
 
 def _detect(path: Path, dir_cache=None):
@@ -412,6 +413,202 @@ class TestHashTier:
         target.mkdir()
 
         assert _detect(target).era == "win98"
+
+
+# ---------------------------------------------------------------------------
+# md5/crc32 hits corroborate the suffix dispatch instead of short-circuiting it
+# ---------------------------------------------------------------------------
+
+_PS1_CNF = "BOOT = cdrom:\\SLUS_000.01;1\r\nTCB = 4\r\nEVENT = 10\r\nSTACK = 801FFF00\r\n"
+
+
+def _ps1_raw_bin() -> bytes:
+    """Raw Mode 2 image with a PS1 SYSTEM.CNF: the .bin dispatch reads it as
+    ps1 via SYSTEM.CNF (corpus row ps1_raw_bin_boot)."""
+    from formatscout.tests.builders.iso9660 import build_iso
+    return build_iso({}, system_cnf=_PS1_CNF, system_id="PLAYSTATION", volume_id="FSPS", framing="mode2_form1")
+
+
+def _weak_hash_index(tmp_path: Path, content: bytes, era: str, kind: str = "md5") -> Path:
+    """Index whose only entry matches *content* by md5 (or crc32) alone: its
+    sha1 key is unrelated, so lookup() reports an md5/crc32 hit."""
+    from formatscout.tests.builders import index as index_builder
+    hashes = fx.hashes_for(content)
+    entry = index_builder.IndexEntry("f" * 40, "Weak Hash Game (USA)", era, "Synthetic Platform", **{kind: hashes[kind]})
+    index_dir = tmp_path / "idx"
+    index_dir.mkdir()
+    return index_builder.write_index_v1(index_dir / "index.json", [entry])
+
+
+def _codes(result) -> list[str]:
+    return [issue.code for issue in result.issues]
+
+
+class TestWeakHashCorroboration:
+    @pytest.mark.parametrize("kind, confidence", [("md5", 0.45), ("crc32", 0.35)])
+    def test_hit_without_structural_evidence_is_a_weak_guess(self, tmp_path: Path, monkeypatch, kind, confidence):
+        from formatscout.result import IssueCode, Method, Status
+
+        content = fx.CAUTION_MD5_CONTENT if kind == "md5" else fx.CAUTION_CRC32_CONTENT
+        fx.patch_detector_index(monkeypatch, fx.write_synthetic_index(tmp_path))
+        path = tmp_path / "game.bin"
+        path.write_bytes(content)
+
+        result = _detect(path)
+
+        assert result.era == "ps1"
+        assert result.method == Method(f"hash_{kind}")
+        assert (result.status, result.authoritative) == (Status.GUESS, False)
+        assert result.confidence == confidence
+        assert IssueCode.HASH_WEAK in _codes(result)
+        assert IssueCode.CONFLICTING_EVIDENCE not in _codes(result)
+        assert f"{kind}_index_match" in result.evidence
+
+    def test_agreeing_structure_is_kept_and_records_corroboration(self, tmp_path: Path, monkeypatch):
+        from formatscout.result import Method
+
+        content = _ps1_raw_bin()
+        fx.patch_detector_index(monkeypatch, _weak_hash_index(tmp_path, content, "ps1"))
+        path = tmp_path / "game.bin"
+        path.write_bytes(content)
+
+        result = _detect(path)
+
+        assert result.era == "ps1"
+        assert result.method == Method.SYSTEM_CNF
+        assert result.authoritative is False
+        assert "md5_index_match" in result.evidence
+        assert result.title == "Weak Hash Game (USA)"
+        assert result.confidence >= 0.85
+        assert "corroborated by md5 match" in result.reason
+        assert result.issues == ()
+
+    def test_disagreeing_structure_wins_with_conflicting_evidence(self, tmp_path: Path, monkeypatch):
+        from formatscout.result import IssueCode, Method
+
+        content = _ps1_raw_bin()
+        fx.patch_detector_index(monkeypatch, _weak_hash_index(tmp_path, content, "dreamcast"))
+        path = tmp_path / "game.bin"
+        path.write_bytes(content)
+
+        result = _detect(path)
+
+        assert result.era == "ps1"
+        assert result.method == Method.SYSTEM_CNF
+        assert _codes(result) == [IssueCode.CONFLICTING_EVIDENCE]
+        assert result.issues[0].message in result.warnings
+        assert result.title is None
+
+    def test_hit_inside_structural_candidates_picks_one(self, tmp_path: Path, monkeypatch):
+        from formatscout.result import Method, Status
+
+        content = b"\x00" * 64
+        fx.patch_detector_index(monkeypatch, _weak_hash_index(tmp_path, content, "ps2"))
+        path = tmp_path / "g.bin"
+        path.write_bytes(content)
+        (tmp_path / "g.cue").write_text(build_cue([("g.bin", [(1, "MODE2/2352")])]), encoding="ascii")
+
+        result = _detect(path)
+
+        assert result.era == "ps2"
+        assert (result.method, result.status, result.authoritative) == (Method.HASH_MD5, Status.GUESS, False)
+        assert result.container == "bin_cue"
+        assert result.confidence == 0.85
+
+    def test_hit_outside_structural_candidates_keeps_them(self, tmp_path: Path, monkeypatch):
+        from formatscout.result import IssueCode, Status
+
+        content = b"\x00" * 64
+        fx.patch_detector_index(monkeypatch, _weak_hash_index(tmp_path, content, "xbox"))
+        path = tmp_path / "g.bin"
+        path.write_bytes(content)
+        (tmp_path / "g.cue").write_text(build_cue([("g.bin", [(1, "MODE2/2352")])]), encoding="ascii")
+
+        result = _detect(path)
+
+        assert result.era is None
+        assert result.status == Status.AMBIGUOUS
+        assert IssueCode.CONFLICTING_EVIDENCE in _codes(result)
+
+    def test_extension_guess_does_not_overrule_the_hit(self, tmp_path: Path, monkeypatch):
+        """An extension-only era is not structural evidence: the hit stays the
+        answer (weakly), and the disagreement is reported."""
+        from formatscout.result import IssueCode, Method
+
+        content = fx.CAUTION_MD5_CONTENT
+        fx.patch_detector_index(monkeypatch, fx.write_synthetic_index(tmp_path))
+        path = tmp_path / "game.nes"
+        path.write_bytes(content)
+
+        result = _detect(path)
+
+        assert result.era == "ps1"
+        assert result.method == Method.HASH_MD5
+        assert {IssueCode.HASH_WEAK, IssueCode.CONFLICTING_EVIDENCE} <= set(_codes(result))
+
+    def test_sha1_hit_still_short_circuits(self, tmp_path: Path, monkeypatch):
+        from formatscout import detector
+        from formatscout.result import Method
+
+        fx.patch_detector_index(monkeypatch, fx.write_synthetic_index(tmp_path))
+
+        def _never(*args, **kwargs):
+            raise AssertionError("suffix dispatch must not run after a sha1 hit")
+
+        monkeypatch.setattr(detector, "_detect_file", _never)
+        path = tmp_path / "game.bin"
+        path.write_bytes(fx.VERIFIED_CONTENT)
+
+        result = _detect(path)
+
+        assert (result.era, result.method, result.authoritative) == ("ps1", Method.HASH_SHA1, True)
+
+    def test_requires_install_follows_the_weak_hit_era(self, tmp_path: Path, monkeypatch):
+        from formatscout import detector
+        from formatscout.result import Method, ScanResult
+
+        _no_index(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            detector._hash_lookup, "lookup",
+            lambda path, index_path: ScanResult(
+                title="DOS Thing", platform=None, era="dos", confidence=0.85, reason="md5 match: fake",
+                method=Method.HASH_MD5,
+            ),
+        )
+        monkeypatch.setattr(detector, "detect_iso", lambda path: _scan())
+        path = tmp_path / "game.iso"
+        path.write_bytes(b"\x00" * 64)
+
+        result = _detect(path)
+
+        assert result.era == "dos"
+        assert result.requires_install is True
+
+    def test_dispatch_error_after_a_weak_hit_keeps_the_hit(self, tmp_path: Path, monkeypatch):
+        from formatscout import detector
+        from formatscout.result import IssueCode, Method, ScanResult
+
+        _no_index(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            detector._hash_lookup, "lookup",
+            lambda path, index_path: ScanResult(
+                title="Thing", platform=None, era="ps2", confidence=0.75, reason="crc32 match: fake",
+                method=Method.HASH_CRC32,
+            ),
+        )
+
+        def _boom(path):
+            raise RuntimeError("delegate exploded")
+
+        monkeypatch.setattr(detector, "detect_iso", _boom)
+        path = tmp_path / "game.iso"
+        path.write_bytes(b"\x00" * 64)
+
+        result = _detect(path)
+
+        assert result.era == "ps2"
+        assert result.reason != "unexpected detection error"
+        assert IssueCode.HASH_WEAK in _codes(result)
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ from .hashing import hash_lookup as _hash_lookup
 from .index_errors import INDEX_UNAVAILABLE, IndexUnavailable
 from .index_path import coerce_index_path, resolve_index_path
 from .magic.magic_detect import detect_from_magic, magic_tags
-from .result import Issue, Method, ScanResult, Status
+from .result import Issue, IssueCode, Method, ScanResult, Status
 from .validators import bin_validator
 from .iso_detect import detect_iso, detect_cue, detect_chd, detect_from_pvd
 from .exe_detect import detect_exe
@@ -50,6 +50,120 @@ def _compute_requires_install(path: Path, era: str | None) -> bool:
         except OSError:
             pass
     return False
+
+
+# ── md5/crc32 corroboration ──────────────────────────────────────────────────
+# An md5 or crc32 index hit is not proof (see hash_lookup.lookup()), so it no
+# longer short-circuits detection: the suffix dispatch runs as well and the two
+# are reconciled in _reconcile_weak_hash(). Only these methods count as
+# structural evidence that can corroborate or overrule the hit; extension-only
+# and size-threshold results are not evidence about the file's content.
+
+_WEAK_HASH_METHODS = frozenset({Method.HASH_MD5, Method.HASH_CRC32})
+_STRUCTURAL_METHODS = frozenset({
+    Method.MAGIC, Method.STRUCTURAL, Method.SYSTEM_CNF, Method.PE_HEADER, Method.DIRECTORY_MARKER,
+})
+# Confidence of an md5/crc32 hit that nothing structural corroborates (both in
+# Tier.WEAK). lookup() itself still reports 0.85 / 0.75.
+_UNCORROBORATED_HASH_CONFIDENCE = {Method.HASH_MD5: 0.45, Method.HASH_CRC32: 0.35}
+
+
+def _hash_kind(hit: ScanResult) -> str:
+    return "md5" if hit.method is Method.HASH_MD5 else "crc32"
+
+
+def _structural_for_weak_hit(
+    path: Path, dir_cache: dict[Path, list[Path]] | None,
+) -> ScanResult | None:
+    """The suffix dispatch result for a file that already has an md5/crc32
+    hit, or None if the dispatch raised: the hit then stands alone instead of
+    being lost to detect()'s catch-all."""
+    try:
+        return _detect_file(path, dir_cache)
+    except Exception as exc:
+        log.warning("Structural detection failed for '%s' after a hash hit: %s", path, exc, exc_info=True)
+        return None
+
+
+def _conflict_issue(hit: ScanResult, other: ScanResult, kept: str) -> tuple[Issue, str]:
+    other_eras = other.era if other.era is not None else "/".join(c.era for c in other.candidates)
+    message = _one_line(
+        f"{_hash_kind(hit)} index hit names {hit.era!r} but {other.method} evidence names "
+        f"{other_eras!r}; {kept} kept",
+        limit=200,
+    )
+    return Issue(IssueCode.CONFLICTING_EVIDENCE, message), message
+
+
+def _reconcile_weak_hash(hit: ScanResult, other: ScanResult | None) -> ScanResult:
+    """Combine an md5/crc32 hit (era set, guess) with the suffix dispatch result.
+
+    * Structural evidence with the same era: the structural result is kept
+      (method, status, authoritative, container, requires_extraction) and
+      gains the index title/platform, the hit's confidence if higher, and a
+      "<kind>_index_match" evidence code.
+    * Structural evidence with a different era: the structural result wins
+      unchanged apart from a CONFLICTING_EVIDENCE issue and warning.
+    * Structural candidates (era None) that include the hit's era: the hit
+      picks among them and keeps its confidence (guess, not authoritative).
+      Candidates that exclude it: the structural result wins, with
+      CONFLICTING_EVIDENCE.
+    * No structural era evidence: the hit is returned as a weak guess at
+      reduced confidence with HASH_WEAK. A non-structural guess (extension,
+      size) that agrees only lifts the confidence to its own value; one that
+      disagrees adds CONFLICTING_EVIDENCE but does not overrule the hit.
+    """
+    kind = _hash_kind(hit)
+    match_code = f"{kind}_index_match"
+
+    if other is not None and other.method in _STRUCTURAL_METHODS:
+        if other.era is not None:
+            if other.era == hit.era:
+                if other.title is None:
+                    other.title = hit.title
+                if other.platform is None:
+                    other.platform = hit.platform
+                other.confidence = max(other.confidence, hit.confidence)
+                other.reason = f"{other.reason}; corroborated by {hit.reason}"
+                other.evidence += (match_code,)
+                return other
+            issue, message = _conflict_issue(hit, other, "structural result")
+            other.issues += (issue,)
+            other.warnings.append(message)
+            return other
+        if other.candidates:
+            candidate_eras = [c.era for c in other.candidates]
+            if hit.era in candidate_eras:
+                hit.reason = f"{hit.reason}; one of the {other.method} candidates {'/'.join(candidate_eras)}"
+                hit.container = other.container
+                hit.evidence = other.evidence + (match_code,)
+                hit.warnings = list(other.warnings) + hit.warnings
+                hit.issues = other.issues + hit.issues
+                return hit
+            issue, message = _conflict_issue(hit, other, "structural result")
+            other.issues += (issue,)
+            other.warnings.append(message)
+            return other
+
+    hit.confidence = _UNCORROBORATED_HASH_CONFIDENCE[hit.method]
+    hit.reason = f"{hit.reason} (no structural corroboration)"
+    hit.evidence = (match_code,)
+    weak_message = f"{kind} index hit without structural corroboration; era is a weak guess"
+    hit.issues += (Issue(IssueCode.HASH_WEAK, weak_message),)
+    hit.warnings.append(weak_message)
+    if other is not None:
+        hit.container = other.container
+        hit.evidence = other.evidence + hit.evidence
+        hit.warnings = list(other.warnings) + hit.warnings
+        hit.issues = other.issues + hit.issues
+        if other.era == hit.era:
+            hit.confidence = max(hit.confidence, other.confidence)
+            hit.requires_extraction = other.requires_extraction
+        elif other.era is not None:
+            issue, message = _conflict_issue(hit, other, "hash result")
+            hit.issues += (issue,)
+            hit.warnings.append(message)
+    return hit
 
 
 # ── Index-failure warning ────────────────────────────────────────────────────
@@ -105,18 +219,24 @@ def _detect(
             status=Status.ERROR, method=Method.NONE,
         )
 
-    # Tier 1: hash lookup, highest confidence, return immediately on a match
-    # that resolves an era (a match with era=None falls through to Tier 2+).
+    # Tier 1: hash lookup. A sha1 hit on the file's own bytes or a CHD header
+    # claim that resolves an era returns immediately. An md5/crc32 hit is held
+    # back and reconciled with the suffix dispatch below (see
+    # _reconcile_weak_hash()). A match with era=None falls through to Tier 2+.
     # Directories are a first-class input (Tier 4), not a hashable file, so
     # skip this tier for them entirely rather than reaching hash_file()'s
     # path.open("rb") only to fail.
     index_warning: str | None = None
+    weak_hit: ScanResult | None = None
     if path.is_file():
         try:
             result = _hash_lookup.lookup(path, resolve_index_path(index_path, override=_INDEX_PATH))
             if result is not None and result.era is not None:
-                result.requires_install = _compute_requires_install(path, result.era)
-                return result
+                if result.method in _WEAK_HASH_METHODS:
+                    weak_hit = result
+                else:
+                    result.requires_install = _compute_requires_install(path, result.era)
+                    return result
         except IndexUnavailable as exc:
             # The index itself could not be obtained or trusted: surface it on
             # the result so callers can tell "no hash match" from "hash tier
@@ -136,7 +256,11 @@ def _detect(
             # else here is an input-file read error.
             log.warning("Hash lookup failed for '%s': %s", path, exc, exc_info=True)
 
-    if path.is_file():
+    if weak_hit is not None:
+        # The file was fully read once for hashing; the dispatch below only
+        # reads headers/metadata, the same cost as a file with no hash hit.
+        result = _reconcile_weak_hash(weak_hit, _structural_for_weak_hit(path, dir_cache))
+    elif path.is_file():
         result = _detect_file(path, dir_cache)
     elif path.is_dir():
         result = detect_directory(path)
