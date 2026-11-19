@@ -165,7 +165,7 @@ class TestVocabulary:
     def test_method_values(self):
         assert {m.value for m in Method} == {
             "hash_sha1", "hash_md5", "hash_crc32", "chd_header_claim", "magic", "structural", "system_cnf",
-            "directory_marker", "pe_header", "extension", "size_heuristic", "none",
+            "directory_marker", "pe_header", "extension", "size_heuristic", "title_match", "none",
         }
 
     def test_tier_values(self):
